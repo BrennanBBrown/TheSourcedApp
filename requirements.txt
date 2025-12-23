@@ -11,3 +11,8 @@ torchvision
 sentence-transformers
 serpapi
 firecrawl
+fastapi
+uvicorn[standard]
+supabase
+python-dotenv
+python-multipart
