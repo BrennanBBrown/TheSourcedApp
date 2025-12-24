@@ -1,6 +1,7 @@
 "use client";
 
-import { useState } from "react";
+import { useState, useEffect } from "react";
+import { supabase } from "@/lib/supabase/client";
 
 type Product = {
   name: string;
@@ -15,8 +16,41 @@ export default function SearchPage() {
   const [loading, setLoading] = useState(false);
   const [preview, setPreview] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
+  const [showAuthPopup, setShowAuthPopup] = useState(false);
+  const [currentUserId, setCurrentUserId] = useState<string | null>(null);
+  const [isOnboarded, setIsOnboarded] = useState(false);
+
+  useEffect(() => {
+    loadCurrentUser();
+  }, []);
+
+  async function loadCurrentUser() {
+    const { data: { user } } = await supabase.auth.getUser();
+
+    if (user) {
+      setCurrentUserId(user.id);
+
+      // Check if user is onboarded
+      const { data: profile } = await supabase
+        .from('profiles')
+        .select('is_onboarded')
+        .eq('id', user.id)
+        .single();
+
+      setIsOnboarded(profile?.is_onboarded || false);
+    } else {
+      setCurrentUserId(null);
+      setIsOnboarded(false);
+    }
+  }
 
   const handleFileChange = async (e: React.ChangeEvent<HTMLInputElement>) => {
+    if (!currentUserId || !isOnboarded) {
+      setShowAuthPopup(true);
+      e.target.value = '';
+      return;
+    }
+
     if (!e.target.files || e.target.files.length === 0) return;
     const file = e.target.files[0];
     setPreview(URL.createObjectURL(file));
@@ -54,6 +88,12 @@ export default function SearchPage() {
     setError(null);
   };
 
+  const handleUploadClick = () => {
+    if (!currentUserId || !isOnboarded) {
+      setShowAuthPopup(true);
+    }
+  };
+
   return (
     <>
       <style jsx global>{`
@@ -61,6 +101,50 @@ export default function SearchPage() {
       `}</style>
 
       <div className="min-h-screen bg-white text-black">
+        {/* Auth Required Popup */}
+        {showAuthPopup && (
+          <div
+            className="fixed inset-0 z-[100] flex items-end md:items-center justify-center"
+            onClick={() => setShowAuthPopup(false)}
+          >
+            {/* Backdrop */}
+            <div className="absolute inset-0 bg-black/60 backdrop-blur-sm" />
+
+            {/* Popup */}
+            <div
+              className="relative w-full md:w-auto md:min-w-[400px] md:max-w-lg mx-4 mb-0 md:mb-0"
+              onClick={(e) => e.stopPropagation()}
+            >
+              <div className="bg-white border-2 border-black md:border-4">
+                {/* Header */}
+                <div className="border-b-2 border-black p-6 md:p-8 bg-black text-white">
+                  <h2 className="text-3xl md:text-4xl font-black tracking-tight" style={{ fontFamily: 'Archivo Black, sans-serif' }}>
+                    AUTHENTICATION REQUIRED
+                  </h2>
+                </div>
+
+                {/* Content */}
+                <div className="p-6 md:p-8 space-y-6">
+                  <div className="text-center py-12 md:py-16">
+                    <div className="text-7xl md:text-8xl mb-6">🔒</div>
+                    <p className="text-2xl md:text-3xl tracking-wide mb-3" style={{ fontFamily: 'Bebas Neue, sans-serif' }}>
+                      YOU MUST BE LOGGED IN TO USE THIS FEATURE
+                    </p>
+
+                    <button
+                      onClick={() => setShowAuthPopup(false)}
+                      className="mt-6 bg-black text-white px-12 py-4 font-black tracking-wider hover:bg-black/90 transition-all border-2 border-black"
+                      style={{ fontFamily: 'Bebas Neue, sans-serif' }}
+                    >
+                      GOT IT
+                    </button>
+                  </div>
+                </div>
+              </div>
+            </div>
+          </div>
+        )}
+
         {/* Header */}
         <div className="border-b border-black/20 p-6 md:p-10">
           <div className="max-w-7xl mx-auto">
@@ -81,7 +165,7 @@ export default function SearchPage() {
               {/* Upload Section */}
               <div className="max-w-2xl">
                 {!preview ? (
-                  <label className="block cursor-pointer">
+                  <label className="block cursor-pointer" onClick={handleUploadClick}>
                     <div className="border-2 border-dashed border-black/20 hover:border-black transition-all p-16 md:p-20">
                       <div className="text-center space-y-6">
                         <div className="text-8xl opacity-20">⊕</div>
@@ -95,12 +179,14 @@ export default function SearchPage() {
                         </div>
                       </div>
                     </div>
-                    <input
-                      type="file"
-                      accept="image/*"
-                      className="hidden"
-                      onChange={handleFileChange}
-                    />
+                    {currentUserId && isOnboarded && (
+                      <input
+                        type="file"
+                        accept="image/*"
+                        className="hidden"
+                        onChange={handleFileChange}
+                      />
+                    )}
                   </label>
                 ) : (
                   <div className="relative">
