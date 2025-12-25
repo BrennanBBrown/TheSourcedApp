@@ -44,6 +44,7 @@ export default function OnboardingPage() {
   const [checkingUsername, setCheckingUsername] = useState(false);
   const [usernameAvailable, setUsernameAvailable] = useState<boolean | null>(null);
   const [usernameValidation, setUsernameValidation] = useState<{ valid: boolean; error?: string }>({ valid: true });
+  const [usernameError, setUsernameError] = useState<string | null>(null);
 
   useEffect(() => {
     async function load() {
@@ -82,32 +83,79 @@ export default function OnboardingPage() {
     }
 
     setCheckingUsername(true);
+    setUsernameError(null);
 
     try {
-      const { data, error } = await Promise.race([
-        supabase
-          .from("profiles")
-          .select("username")
-          .eq("username", username.trim().toLowerCase())
-          .maybeSingle(),
-        new Promise((_, reject) =>
-          setTimeout(() => reject(new Error('Timeout')), 5000)
-        )
-      ]) as any;
+      // First check database
+      const { data: dbData, error: dbError } = await supabase
+        .from("profiles")
+        .select("username")
+        .eq("username", username.trim().toLowerCase())
+        .maybeSingle();
 
-      setCheckingUsername(false);
-
-      if (error) {
-        console.error("Error checking username:", error);
+      if (dbError) {
+        console.error("Error checking username in database:", dbError);
+        setCheckingUsername(false);
         setUsernameAvailable(null);
+        setUsernameError(null);
         return;
       }
 
-      setUsernameAvailable(data === null);
-    } catch (timeoutError) {
-      console.error("Username check timeout");
+      if (dbData) {
+        // Username exists in database
+        setUsernameAvailable(false);
+        setUsernameError("Username already taken");
+        setCheckingUsername(false);
+        return;
+      }
+
+      // Then check moderation endpoint for inappropriate content
+      const controller = new AbortController();
+      const timeoutId = setTimeout(() => controller.abort(), 10000); // 10 second timeout
+
+      const moderationResponse = await fetch("https://sourced-5ovn.onrender.com/check-username", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ username: username.trim().toLowerCase() }),
+        signal: controller.signal,
+      });
+
+      clearTimeout(timeoutId);
+
+      if (!moderationResponse.ok) {
+        console.error("Moderation check failed");
+        // If moderation fails, still allow if database check passed
+        setUsernameAvailable(true);
+        setUsernameError(null);
+        setCheckingUsername(false);
+        return;
+      }
+
+      const moderationData = await moderationResponse.json();
+
+      // Check if username is safe (doesn't contain banned words)
+      if (moderationData.safe === true) {
+        setUsernameAvailable(true);
+        setUsernameError(null);
+      } else {
+        setUsernameAvailable(false);
+        setUsernameError("Username contains inappropriate content");
+      }
       setCheckingUsername(false);
-      setUsernameAvailable(null);
+
+    } catch (error: any) {
+      console.error("Username check error:", error);
+      setCheckingUsername(false);
+
+      // If timeout or network error, be lenient and allow if database check passed
+      if (error.name === 'AbortError') {
+        console.log("Moderation check timed out, proceeding with database check only");
+        setUsernameAvailable(true);
+        setUsernameError(null);
+      } else {
+        setUsernameAvailable(null);
+        setUsernameError(null);
+      }
     }
   }
 
@@ -116,12 +164,16 @@ export default function OnboardingPage() {
     if (!username) {
       setUsernameAvailable(null);
       setUsernameValidation({ valid: true });
+      setUsernameError(null);
       return;
     }
 
     // Only do basic validation while typing
     const validation = validateUsername(username);
     setUsernameValidation(validation);
+
+    // Reset error when user types
+    setUsernameError(null);
   }, [username]);
 
   async function handleFinishOnboarding() {
@@ -297,7 +349,7 @@ export default function OnboardingPage() {
                   <div className="flex items-center gap-2">
                     <span className="text-red-400 text-xs">✗</span>
                     <p className="text-red-400 text-xs tracking-wide">
-                      Username already taken
+                      {usernameError || "Username not available"}
                     </p>
                   </div>
                 )}
