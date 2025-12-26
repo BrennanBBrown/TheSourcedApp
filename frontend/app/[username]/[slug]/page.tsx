@@ -83,7 +83,8 @@ function extractSellerFromUrl(url: string): string {
 export default function CatalogDetailPage() {
   const router = useRouter();
   const params = useParams();
-  const catalogId = params.id as string;
+  const username = (params.username as string).replace('@', '');
+  const slug = params.slug as string;
 
   const [catalog, setCatalog] = useState<CatalogData | null>(null);
   const [items, setItems] = useState<CatalogItem[]>([]);
@@ -125,11 +126,16 @@ export default function CatalogDetailPage() {
   }, []);
 
   useEffect(() => {
-    if (catalogId) {
+    if (username && slug) {
       loadCatalog();
+    }
+  }, [username, slug, currentUserId]);
+
+  useEffect(() => {
+    if (catalog) {
       loadItems();
     }
-  }, [catalogId, currentUserId]);
+  }, [catalog?.id, currentUserId]);
 
   // Filter and sort items
   useEffect(() => {
@@ -188,17 +194,23 @@ export default function CatalogDetailPage() {
       const { data, error } = await supabase
         .from('catalogs')
         .select(`
-          id, name, description, image_url, visibility, owner_id, bookmark_count,
+          id, name, description, image_url, visibility, owner_id, bookmark_count, slug,
           profiles!catalogs_owner_id_fkey(username, full_name, avatar_url)
         `)
-        .eq('id', catalogId)
+        .eq('slug', slug)
         .single();
 
       if (error) throw error;
 
+      // Verify username matches
+      const owner = Array.isArray(data.profiles) ? data.profiles[0] : data.profiles;
+      if (owner.username !== username) {
+        throw new Error('Username mismatch');
+      }
+
       const catalogData: CatalogData = {
         ...data,
-        owner: Array.isArray(data.profiles) ? data.profiles[0] : data.profiles
+        owner: owner
       };
 
       setCatalog(catalogData);
@@ -208,7 +220,7 @@ export default function CatalogDetailPage() {
           .from('bookmarked_catalogs')
           .select('id')
           .eq('user_id', currentUserId)
-          .eq('catalog_id', catalogId)
+          .eq('catalog_id', data.id)
           .single();
 
         setIsBookmarked(!!bookmarkData);
@@ -221,11 +233,13 @@ export default function CatalogDetailPage() {
   }
 
   async function loadItems() {
+    if (!catalog) return;
+
     try {
       const { data, error } = await supabase
         .from('catalog_items')
         .select('*')
-        .eq('catalog_id', catalogId)
+        .eq('catalog_id', catalog.id)
         .order('created_at', { ascending: false });
 
       if (error) throw error;
@@ -259,13 +273,16 @@ export default function CatalogDetailPage() {
       return;
     }
 
+    if (!catalog) return;
+
     try {
       if (isBookmarked) {
         await supabase.from('bookmarked_catalogs').delete()
-          .eq('user_id', currentUserId).eq('catalog_id', catalogId);
+          .eq('user_id', currentUserId)
+          .eq('catalog_id', catalog.id);
       } else {
         await supabase.from('bookmarked_catalogs')
-          .insert({ user_id: currentUserId, catalog_id: catalogId });
+          .insert({ user_id: currentUserId, catalog_id: catalog.id });
       }
 
       await loadCatalog();
@@ -411,6 +428,11 @@ export default function CatalogDetailPage() {
       return;
     }
 
+    if (!catalog) {
+      setImageError('Catalog not loaded');
+      return;
+    }
+
     setCreating(true);
     setImageError('');
     setProductUrlError('');
@@ -455,7 +477,7 @@ export default function CatalogDetailPage() {
       setCreatingStatus('Categorizing with AI...');
 
       const requestBody = {
-        catalog_id: catalogId,
+        catalog_id: catalog.id,
         title: itemTitle.trim(),
         image_url: finalImageUrl,
         product_url: itemProductUrl.trim(),
@@ -571,7 +593,7 @@ export default function CatalogDetailPage() {
                 <h1 className="text-3xl md:text-5xl font-black tracking-tighter" style={{ fontFamily: 'Archivo Black, sans-serif' }}>{catalog.name}</h1>
 
                 {/* Circular profile icon */}
-                <div className="flex items-center gap-3 cursor-pointer hover:opacity-70 transition-opacity w-fit" onClick={() => router.push(`/profiles/${catalog.owner_id}`)}>
+                <div className="flex items-center gap-3 cursor-pointer hover:opacity-70 transition-opacity w-fit" onClick={() => router.push(`/${catalog.owner.username}`)}>
                   <div className="w-8 h-8 md:w-10 md:h-10 rounded-full border border-black overflow-hidden">
                     {catalog?.owner?.avatar_url ? (
                       <img src={catalog.owner.avatar_url} alt={catalog.owner.username} className="w-full h-full object-cover" />

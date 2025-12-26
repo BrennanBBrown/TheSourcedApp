@@ -3,6 +3,7 @@
 import { useEffect, useState } from "react";
 import { supabase } from "@/lib/supabase/client";
 import { useRouter } from "next/navigation";
+import { generateSlug } from '@/lib/utils/slug';
 
 type UserCatalog = {
   id: string;
@@ -11,9 +12,15 @@ type UserCatalog = {
   image_url: string | null;
   visibility: string;
   created_at: string;
+  updated_at?: string;
   item_count: number;
   bookmark_count: number;
+  slug: string;
+  profiles: { username: string };
 };
+
+type SortOption = 'recent' | 'oldest' | 'name' | 'items' | 'bookmarks';
+type ViewMode = 'grid' | 'list';
 
 async function checkImageSafety(imageUrl: string): Promise<{ safe: boolean; error?: string }> {
   try {
@@ -51,7 +58,14 @@ export default function CatalogsPage() {
   const router = useRouter();
   const [currentUserId, setCurrentUserId] = useState<string | null>(null);
   const [userCatalogs, setUserCatalogs] = useState<UserCatalog[]>([]);
+  const [filteredCatalogs, setFilteredCatalogs] = useState<UserCatalog[]>([]);
   const [loading, setLoading] = useState(true);
+
+  // View options
+  const [sortBy, setSortBy] = useState<SortOption>('recent');
+  const [viewMode, setViewMode] = useState<ViewMode>('grid');
+  const [searchQuery, setSearchQuery] = useState('');
+  const [filterVisibility, setFilterVisibility] = useState<'all' | 'public' | 'private'>('all');
 
   // Edit mode
   const [editMode, setEditMode] = useState(false);
@@ -82,6 +96,45 @@ export default function CatalogsPage() {
     if (currentUserId) loadCatalogs();
   }, [currentUserId]);
 
+  // Filter and sort catalogs
+  useEffect(() => {
+    let filtered = [...userCatalogs];
+
+    // Search filter
+    if (searchQuery.trim()) {
+      const query = searchQuery.toLowerCase();
+      filtered = filtered.filter(cat =>
+        cat.name.toLowerCase().includes(query) ||
+        cat.description?.toLowerCase().includes(query)
+      );
+    }
+
+    // Visibility filter
+    if (filterVisibility !== 'all') {
+      filtered = filtered.filter(cat => cat.visibility === filterVisibility);
+    }
+
+    // Sort
+    filtered.sort((a, b) => {
+      switch (sortBy) {
+        case 'recent':
+          return new Date(b.created_at).getTime() - new Date(a.created_at).getTime();
+        case 'oldest':
+          return new Date(a.created_at).getTime() - new Date(b.created_at).getTime();
+        case 'name':
+          return a.name.localeCompare(b.name);
+        case 'items':
+          return b.item_count - a.item_count;
+        case 'bookmarks':
+          return b.bookmark_count - a.bookmark_count;
+        default:
+          return 0;
+      }
+    });
+
+    setFilteredCatalogs(filtered);
+  }, [userCatalogs, searchQuery, filterVisibility, sortBy]);
+
   async function loadUser() {
     const { data: { user } } = await supabase.auth.getUser();
     setCurrentUserId(user?.id || null);
@@ -94,7 +147,7 @@ export default function CatalogsPage() {
     try {
       const { data, error } = await supabase
         .from('catalogs')
-        .select(`id, name, description, image_url, visibility, created_at, bookmark_count, catalog_items(count)`)
+        .select(`id, name, description, image_url, visibility, created_at, updated_at, bookmark_count, slug, profiles!catalogs_owner_id_fkey(username), catalog_items(count)`)
         .eq('owner_id', currentUserId)
         .order('created_at', { ascending: false });
 
@@ -102,7 +155,8 @@ export default function CatalogsPage() {
         setUserCatalogs(data.map(cat => ({
           ...cat,
           item_count: cat.catalog_items?.[0]?.count || 0,
-          bookmark_count: cat.bookmark_count || 0
+          bookmark_count: cat.bookmark_count || 0,
+          profiles: Array.isArray(cat.profiles) ? cat.profiles[0] : cat.profiles
         })));
       }
     } catch (error) {
@@ -143,10 +197,10 @@ export default function CatalogsPage() {
   }
 
   function selectAll() {
-    if (selectedCatalogs.size === userCatalogs.length) {
+    if (selectedCatalogs.size === filteredCatalogs.length) {
       setSelectedCatalogs(new Set());
     } else {
-      setSelectedCatalogs(new Set(userCatalogs.map(c => c.id)));
+      setSelectedCatalogs(new Set(filteredCatalogs.map(c => c.id)));
     }
   }
 
@@ -265,16 +319,19 @@ export default function CatalogsPage() {
         finalImageUrl = catalogImageUrl;
       }
 
+      const slug = generateSlug(catalogName);
+
       const { data, error } = await supabase
         .from('catalogs')
         .insert({
           name: catalogName.trim(),
+          slug: slug,
           description: catalogDescription.trim() || null,
           image_url: finalImageUrl || null,
           visibility: catalogVisibility,
           owner_id: currentUserId
         })
-        .select()
+        .select('*, profiles!catalogs_owner_id_fkey(username)')
         .single();
 
       if (error) throw error;
@@ -289,7 +346,9 @@ export default function CatalogsPage() {
       setShowCreateModal(false);
 
       await loadCatalogs();
-      router.push(`/catalogs/${data.id}`);
+
+      const owner = Array.isArray(data.profiles) ? data.profiles[0] : data.profiles;
+      router.push(`/${owner.username}/${slug}`);
     } catch (error) {
       console.error('Error creating catalog:', error);
       alert('Failed to create catalog');
@@ -297,6 +356,9 @@ export default function CatalogsPage() {
       setCreating(false);
     }
   }
+
+  const totalItems = userCatalogs.reduce((sum, cat) => sum + cat.item_count, 0);
+  const publicCount = userCatalogs.filter(cat => cat.visibility === 'public').length;
 
   if (loading) {
     return (
@@ -335,63 +397,135 @@ export default function CatalogsPage() {
         <div className="sticky top-0 z-40 bg-white/95 backdrop-blur-md border-b border-black/10">
           <div className="max-w-7xl mx-auto px-4 md:px-6 py-4 md:py-6">
             {/* Desktop Layout */}
-            <div className="hidden md:flex items-center justify-between">
-              <div>
-                <h1 className="text-5xl font-black tracking-tighter" style={{ fontFamily: 'Archivo Black, sans-serif' }}>
-                  YOUR CATALOGS
-                </h1>
-                <p className="text-sm opacity-40 mt-1">{userCatalogs.length} total</p>
-              </div>
+            <div className="hidden md:block">
+              <div className="flex items-center justify-between mb-4">
+                <div>
+                  <h1 className="text-5xl font-black tracking-tighter" style={{ fontFamily: 'Archivo Black, sans-serif' }}>
+                    YOUR CATALOGS
+                  </h1>
+                  <div className="flex items-center gap-4 text-xs opacity-40 mt-2">
+                    <span>{userCatalogs.length} catalog{userCatalogs.length !== 1 ? 's' : ''}</span>
+                    <span>•</span>
+                    <span>{totalItems} item{totalItems !== 1 ? 's' : ''}</span>
+                    <span>•</span>
+                    <span>{publicCount} public</span>
+                  </div>
+                </div>
 
-              <div className="flex items-center gap-3">
-                {!editMode ? (
-                  <>
-                    <button
-                      onClick={() => setEditMode(true)}
-                      className="px-8 py-3 border border-black/20 hover:border-black hover:bg-black/5 transition-all text-sm tracking-wider font-black"
-                      style={{ fontFamily: 'Bebas Neue, sans-serif' }}
-                    >
-                      EDIT
-                    </button>
-                    <button
-                      onClick={() => setShowCreateModal(true)}
-                      className="px-8 py-3 bg-black text-white hover:bg-black/90 transition-all text-sm tracking-wider font-black"
-                      style={{ fontFamily: 'Bebas Neue, sans-serif' }}
-                    >
-                      + NEW
-                    </button>
-                  </>
-                ) : (
-                  <>
-                    <button
-                      onClick={selectAll}
-                      className="px-6 py-3 border border-black/20 hover:border-black hover:bg-black/5 transition-all text-sm tracking-wider font-black"
-                      style={{ fontFamily: 'Bebas Neue, sans-serif' }}
-                    >
-                      {selectedCatalogs.size === userCatalogs.length ? 'DESELECT ALL' : 'SELECT ALL'}
-                    </button>
-                    {selectedCatalogs.size > 0 && (
+                <div className="flex items-center gap-3">
+                  {!editMode ? (
+                    <>
                       <button
-                        onClick={deleteSelected}
-                        className="px-6 py-3 bg-red-500 text-white hover:bg-red-600 transition-all text-sm tracking-wider font-black"
+                        onClick={() => setEditMode(true)}
+                        className="px-12 py-2.5 border border-black/20 hover:border-black hover:bg-black/5 transition-all text-sm tracking-wider font-black"
                         style={{ fontFamily: 'Bebas Neue, sans-serif' }}
                       >
-                        DELETE ({selectedCatalogs.size})
+                        EDIT
                       </button>
-                    )}
-                    <button
-                      onClick={() => {
-                        setEditMode(false);
-                        setSelectedCatalogs(new Set());
-                      }}
-                      className="px-6 py-3 border border-black/20 hover:border-black hover:bg-black/5 transition-all text-sm tracking-wider font-black"
-                      style={{ fontFamily: 'Bebas Neue, sans-serif' }}
-                    >
-                      DONE
-                    </button>
-                  </>
-                )}
+                      <button
+                        onClick={() => setShowCreateModal(true)}
+                        className="px-12 py-2.5 bg-black text-white hover:bg-black/90 transition-all text-sm tracking-wider font-black"
+                        style={{ fontFamily: 'Bebas Neue, sans-serif' }}
+                      >
+                        CREATE CATALOG
+                      </button>
+                    </>
+                  ) : (
+                    <>
+                      <button
+                        onClick={selectAll}
+                        className="px-10 py-2.5 border border-black/20 hover:border-black hover:bg-black/5 transition-all text-sm tracking-wider font-black"
+                        style={{ fontFamily: 'Bebas Neue, sans-serif' }}
+                      >
+                        {selectedCatalogs.size === filteredCatalogs.length ? 'DESELECT ALL' : 'SELECT ALL'}
+                      </button>
+                      {selectedCatalogs.size > 0 && (
+                        <button
+                          onClick={deleteSelected}
+                          className="px-10 py-2.5 bg-red-500 text-white hover:bg-red-600 transition-all text-sm tracking-wider font-black"
+                          style={{ fontFamily: 'Bebas Neue, sans-serif' }}
+                        >
+                          DELETE ({selectedCatalogs.size})
+                        </button>
+                      )}
+                      <button
+                        onClick={() => {
+                          setEditMode(false);
+                          setSelectedCatalogs(new Set());
+                        }}
+                        className="px-10 py-2.5 border border-black/20 hover:border-black hover:bg-black/5 transition-all text-sm tracking-wider font-black"
+                        style={{ fontFamily: 'Bebas Neue, sans-serif' }}
+                      >
+                        DONE
+                      </button>
+                    </>
+                  )}
+                </div>
               </div>
+
+              {/* Search and Filters */}
+              {userCatalogs.length > 0 && (
+                <div className="flex items-center gap-3 mt-4">
+                  {/* Search */}
+                  <div className="flex-1 max-w-md">
+                    <input
+                      type="text"
+                      value={searchQuery}
+                      onChange={(e) => setSearchQuery(e.target.value)}
+                      placeholder="Search catalogs..."
+                      className="w-full px-4 py-2 border border-black/10 focus:border-black/30 focus:outline-none text-sm"
+                    />
+                  </div>
+
+                  {/* Sort */}
+                  <select
+                    value={sortBy}
+                    onChange={(e) => setSortBy(e.target.value as SortOption)}
+                    className="px-4 py-2 border border-black/10 focus:border-black/30 focus:outline-none text-xs tracking-wider font-black bg-white"
+                    style={{ fontFamily: 'Bebas Neue, sans-serif' }}
+                  >
+                    <option value="recent">RECENT</option>
+                    <option value="oldest">OLDEST</option>
+                    <option value="name">NAME</option>
+                    <option value="items">MOST ITEMS</option>
+                    <option value="bookmarks">MOST BOOKMARKED</option>
+                  </select>
+
+                  {/* Visibility Filter */}
+                  <select
+                    value={filterVisibility}
+                    onChange={(e) => setFilterVisibility(e.target.value as 'all' | 'public' | 'private')}
+                    className="px-4 py-2 border border-black/10 focus:border-black/30 focus:outline-none text-xs tracking-wider font-black bg-white"
+                    style={{ fontFamily: 'Bebas Neue, sans-serif' }}
+                  >
+                    <option value="all">ALL</option>
+                    <option value="public">PUBLIC</option>
+                    <option value="private">PRIVATE</option>
+                  </select>
+
+                  {/* View Mode */}
+                  <div className="flex border border-black/10">
+                    <button
+                      onClick={() => setViewMode('grid')}
+                      className={`p-2 ${viewMode === 'grid' ? 'bg-black text-white' : 'hover:bg-black/5'}`}
+                      title="Grid view"
+                    >
+                      <svg className="w-4 h-4" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                        <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M4 6a2 2 0 012-2h2a2 2 0 012 2v2a2 2 0 01-2 2H6a2 2 0 01-2-2V6zM14 6a2 2 0 012-2h2a2 2 0 012 2v2a2 2 0 01-2 2h-2a2 2 0 01-2-2V6zM4 16a2 2 0 012-2h2a2 2 0 012 2v2a2 2 0 01-2 2H6a2 2 0 01-2-2v-2zM14 16a2 2 0 012-2h2a2 2 0 012 2v2a2 2 0 01-2 2h-2a2 2 0 01-2-2v-2z" />
+                      </svg>
+                    </button>
+                    <button
+                      onClick={() => setViewMode('list')}
+                      className={`p-2 border-l border-black/10 ${viewMode === 'list' ? 'bg-black text-white' : 'hover:bg-black/5'}`}
+                      title="List view"
+                    >
+                      <svg className="w-4 h-4" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                        <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M4 6h16M4 12h16M4 18h16" />
+                      </svg>
+                    </button>
+                  </div>
+                </div>
+              )}
             </div>
 
             {/* Mobile Layout */}
@@ -399,81 +533,145 @@ export default function CatalogsPage() {
               <h1 className="text-3xl font-black tracking-tighter" style={{ fontFamily: 'Archivo Black, sans-serif' }}>
                 YOUR CATALOGS
               </h1>
-              <p className="text-xs opacity-40 mt-1 mb-3">{userCatalogs.length} total</p>
+              <div className="flex items-center gap-3 text-[10px] opacity-40 mt-1 mb-3">
+                <span>{userCatalogs.length} catalog{userCatalogs.length !== 1 ? 's' : ''}</span>
+                <span>•</span>
+                <span>{totalItems} items</span>
+              </div>
 
-              <div className="flex justify-end gap-2">
-                {!editMode ? (
-                  <>
-                    <button
-                      onClick={() => setEditMode(true)}
-                      className="px-6 py-2 border border-black/20 hover:border-black hover:bg-black/5 transition-all text-xs tracking-wider font-black"
-                      style={{ fontFamily: 'Bebas Neue, sans-serif' }}
-                    >
-                      EDIT
-                    </button>
-                    <button
-                      onClick={() => setShowCreateModal(true)}
-                      className="px-6 py-2 bg-black text-white hover:bg-black/90 transition-all text-xs tracking-wider font-black"
-                      style={{ fontFamily: 'Bebas Neue, sans-serif' }}
-                    >
-                      + NEW
-                    </button>
-                  </>
-                ) : (
-                  <>
-                    <button
-                      onClick={selectAll}
-                      className="px-4 py-2 border border-black/20 hover:border-black hover:bg-black/5 transition-all text-xs tracking-wider font-black"
-                      style={{ fontFamily: 'Bebas Neue, sans-serif' }}
-                    >
-                      {selectedCatalogs.size === userCatalogs.length ? 'DESELECT' : 'SELECT ALL'}
-                    </button>
-                    {selectedCatalogs.size > 0 && (
+              {/* Search and Action Buttons Row */}
+              {userCatalogs.length > 0 ? (
+                <div className="flex gap-2 mb-2">
+                  <input
+                    type="text"
+                    value={searchQuery}
+                    onChange={(e) => setSearchQuery(e.target.value)}
+                    placeholder="Search..."
+                    className="flex-1 px-3 py-2 border border-black/10 focus:border-black/30 focus:outline-none text-sm"
+                  />
+                  {!editMode ? (
+                    <>
                       <button
-                        onClick={deleteSelected}
-                        className="px-4 py-2 bg-red-500 text-white hover:bg-red-600 transition-all text-xs tracking-wider font-black"
+                        onClick={() => setEditMode(true)}
+                        className="px-6 py-2 border border-black/20 hover:border-black hover:bg-black/5 transition-all text-xs tracking-wider font-black flex-shrink-0"
                         style={{ fontFamily: 'Bebas Neue, sans-serif' }}
                       >
-                        DELETE ({selectedCatalogs.size})
+                        EDIT
                       </button>
-                    )}
+                      <button
+                        onClick={() => setShowCreateModal(true)}
+                        className="px-6 py-2 bg-black text-white hover:bg-black/90 transition-all text-xs tracking-wider font-black flex-shrink-0"
+                        style={{ fontFamily: 'Bebas Neue, sans-serif' }}
+                      >
+                        CREATE
+                      </button>
+                    </>
+                  ) : (
                     <button
                       onClick={() => {
                         setEditMode(false);
                         setSelectedCatalogs(new Set());
                       }}
-                      className="px-4 py-2 border border-black/20 hover:border-black hover:bg-black/5 transition-all text-xs tracking-wider font-black"
+                      className="px-6 py-2 border border-black/20 hover:border-black hover:bg-black/5 transition-all text-xs tracking-wider font-black flex-shrink-0"
                       style={{ fontFamily: 'Bebas Neue, sans-serif' }}
                     >
                       DONE
                     </button>
-                  </>
-                )}
-              </div>
+                  )}
+                </div>
+              ) : (
+                <div className="flex justify-end gap-2 mb-2">
+                  <button
+                    onClick={() => setShowCreateModal(true)}
+                    className="px-8 py-2.5 bg-black text-white hover:bg-black/90 transition-all text-xs tracking-wider font-black"
+                    style={{ fontFamily: 'Bebas Neue, sans-serif' }}
+                  >
+                    CREATE
+                  </button>
+                </div>
+              )}
+
+              {/* Edit Mode Actions Row */}
+              {editMode && (
+                <div className="flex gap-2 mb-2">
+                  <button
+                    onClick={selectAll}
+                    className="flex-1 py-2 border border-black/20 hover:border-black hover:bg-black/5 transition-all text-xs tracking-wider font-black"
+                    style={{ fontFamily: 'Bebas Neue, sans-serif' }}
+                  >
+                    {selectedCatalogs.size === filteredCatalogs.length ? 'DESELECT' : 'SELECT ALL'}
+                  </button>
+                  {selectedCatalogs.size > 0 && (
+                    <button
+                      onClick={deleteSelected}
+                      className="flex-1 py-2 bg-red-500 text-white hover:bg-red-600 transition-all text-xs tracking-wider font-black"
+                      style={{ fontFamily: 'Bebas Neue, sans-serif' }}
+                    >
+                      DELETE ({selectedCatalogs.size})
+                    </button>
+                  )}
+                </div>
+              )}
+
+              {/* Filters Row */}
+              {userCatalogs.length > 0 && (
+                <div className="flex gap-2">
+                  <select
+                    value={sortBy}
+                    onChange={(e) => setSortBy(e.target.value as SortOption)}
+                    className="flex-1 px-3 py-2 border border-black/10 focus:border-black/30 focus:outline-none text-xs tracking-wider font-black bg-white"
+                    style={{ fontFamily: 'Bebas Neue, sans-serif' }}
+                  >
+                    <option value="recent">RECENT</option>
+                    <option value="oldest">OLDEST</option>
+                    <option value="name">NAME</option>
+                    <option value="items">ITEMS</option>
+                    <option value="bookmarks">BOOKMARKS</option>
+                  </select>
+                  <select
+                    value={filterVisibility}
+                    onChange={(e) => setFilterVisibility(e.target.value as 'all' | 'public' | 'private')}
+                    className="flex-1 px-3 py-2 border border-black/10 focus:border-black/30 focus:outline-none text-xs tracking-wider font-black bg-white"
+                    style={{ fontFamily: 'Bebas Neue, sans-serif' }}
+                  >
+                    <option value="all">ALL</option>
+                    <option value="public">PUBLIC</option>
+                    <option value="private">PRIVATE</option>
+                  </select>
+                </div>
+              )}
             </div>
           </div>
         </div>
 
-        {/* Catalogs Grid */}
+        {/* Catalogs Content */}
         <div className="max-w-7xl mx-auto px-4 md:px-6 py-6 md:py-10">
-          {userCatalogs.length === 0 ? (
+          {filteredCatalogs.length === 0 ? (
             <div className="text-center py-20 md:py-32">
               <div className="text-6xl md:text-8xl opacity-5 mb-6">✦</div>
               <h2 className="text-2xl md:text-3xl font-black tracking-tighter mb-3" style={{ fontFamily: 'Archivo Black, sans-serif' }}>
-                NO CATALOGS YET
+                {userCatalogs.length === 0 ? 'NO CATALOGS YET' : 'NO RESULTS'}
               </h2>
-              <p className="text-sm md:text-base opacity-40 mb-8">Create your first catalog to get started</p>
-              <button
-                onClick={() => setShowCreateModal(true)}
-                className="px-8 py-3 bg-black text-white hover:bg-black/90 transition-all text-xs tracking-wider font-black"
-                style={{ fontFamily: 'Bebas Neue, sans-serif' }}
-              >
-                CREATE CATALOG
-              </button>
+              <p className="text-sm md:text-base opacity-40 mb-8">
+                {userCatalogs.length === 0
+                  ? 'Create your first catalog to get started'
+                  : 'Try adjusting your filters or search query'
+                }
+              </p>
+              {userCatalogs.length === 0 && (
+                <button
+                  onClick={() => setShowCreateModal(true)}
+                  className="px-10 py-3 bg-black text-white hover:bg-black/90 transition-all text-xs tracking-wider font-black"
+                  style={{ fontFamily: 'Bebas Neue, sans-serif' }}
+                >
+                  CREATE CATALOG
+                </button>
+              )}
             </div>
-          ) : (
+          ) : viewMode === 'grid' ? (
+            /* Grid View */
             <div className="grid grid-cols-2 md:grid-cols-3 lg:grid-cols-4 xl:grid-cols-5 gap-3 md:gap-4">
-              {userCatalogs.map(catalog => (
+              {filteredCatalogs.map(catalog => (
                 <div
                   key={catalog.id}
                   className={`group relative border transition-all ${
@@ -505,7 +703,7 @@ export default function CatalogsPage() {
                   {/* Catalog Card */}
                   <div
                     className={`${!editMode ? 'cursor-pointer' : ''}`}
-                    onClick={() => !editMode && router.push(`/catalogs/${catalog.id}`)}
+                    onClick={() => !editMode && router.push(`/${catalog.profiles.username}/${catalog.slug}`)}
                   >
                     {/* Image */}
                     <div className="aspect-square bg-black/5 overflow-hidden">
@@ -549,6 +747,86 @@ export default function CatalogsPage() {
                       </button>
                     </div>
                   )}
+                </div>
+              ))}
+            </div>
+          ) : (
+            /* List View */
+            <div className="space-y-2">
+              {filteredCatalogs.map(catalog => (
+                <div
+                  key={catalog.id}
+                  className={`flex items-center gap-4 p-3 md:p-4 border transition-all ${
+                    editMode && selectedCatalogs.has(catalog.id)
+                      ? 'border-black bg-black/5'
+                      : 'border-black/10 hover:border-black/30'
+                  } ${!editMode ? 'cursor-pointer' : ''}`}
+                  onClick={() => !editMode && router.push(`/${catalog.profiles.username}/${catalog.slug}`)}
+                >
+                  {/* Selection Checkbox */}
+                  {editMode && (
+                    <button
+                      onClick={(e) => {
+                        e.stopPropagation();
+                        toggleSelectCatalog(catalog.id);
+                      }}
+                      className={`w-6 h-6 md:w-7 md:h-7 border-2 flex items-center justify-center flex-shrink-0 transition-all ${
+                        selectedCatalogs.has(catalog.id)
+                          ? 'bg-black border-black'
+                          : 'bg-white border-black/30 hover:border-black'
+                      }`}
+                    >
+                      {selectedCatalogs.has(catalog.id) && (
+                        <svg className="w-3 h-3 md:w-4 md:h-4 text-white" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={3}>
+                          <path strokeLinecap="round" strokeLinejoin="round" d="M5 13l4 4L19 7" />
+                        </svg>
+                      )}
+                    </button>
+                  )}
+
+                  {/* Image */}
+                  <div className="w-16 h-16 md:w-20 md:h-20 bg-black/5 flex-shrink-0">
+                    {catalog.image_url ? (
+                      <img src={catalog.image_url} alt={catalog.name} className="w-full h-full object-cover" />
+                    ) : (
+                      <div className="w-full h-full flex items-center justify-center">
+                        <span className="text-2xl opacity-10">✦</span>
+                      </div>
+                    )}
+                  </div>
+
+                  {/* Info */}
+                  <div className="flex-1 min-w-0">
+                    <h3 className="text-sm md:text-base font-black tracking-wide uppercase truncate" style={{ fontFamily: 'Bebas Neue, sans-serif' }}>
+                      {catalog.name}
+                    </h3>
+                    {catalog.description && (
+                      <p className="text-xs opacity-60 truncate">{catalog.description}</p>
+                    )}
+                    <div className="flex items-center gap-4 text-xs opacity-40 mt-1">
+                      <span>{catalog.item_count} items</span>
+                      <span>🔖 {catalog.bookmark_count}</span>
+                    </div>
+                  </div>
+
+                  {/* Visibility Badge */}
+                  <div className="flex-shrink-0">
+                    <button
+                      onClick={(e) => {
+                        e.stopPropagation();
+                        if (!editMode) toggleVisibility(catalog.id, catalog.visibility);
+                      }}
+                      disabled={editMode}
+                      className={`px-4 py-1.5 text-[10px] tracking-wider font-black transition-all ${
+                        catalog.visibility === 'public'
+                          ? 'bg-black text-white'
+                          : 'border border-black/20'
+                      } ${!editMode && 'hover:opacity-80'}`}
+                      style={{ fontFamily: 'Bebas Neue, sans-serif' }}
+                    >
+                      {catalog.visibility === 'public' ? 'PUBLIC' : 'PRIVATE'}
+                    </button>
+                  </div>
                 </div>
               ))}
             </div>

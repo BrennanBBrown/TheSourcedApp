@@ -25,6 +25,7 @@ type SearchItem = {
   catalog: {
     id: string;
     name: string;
+    slug: string;
     owner: {
       username: string;
     };
@@ -40,6 +41,7 @@ type SearchCatalog = {
   bookmark_count: number;
   is_bookmarked: boolean;
   item_count: number;
+  slug: string;
   owner: {
     username: string;
     avatar_url: string | null;
@@ -237,7 +239,7 @@ function DiscoverContent() {
           gender,
           price_tier,
           created_at,
-          catalogs!inner(id, name, visibility, profiles!inner(username))
+          catalogs!inner(id, name, slug, visibility, profiles!inner(username))
         `)
         .eq('catalogs.visibility', 'public');
 
@@ -312,6 +314,7 @@ function DiscoverContent() {
         catalog: {
           id: item.catalogs.id,
           name: item.catalogs.name,
+          slug: item.catalogs.slug,
           owner: {
             username: item.catalogs.profiles.username
           }
@@ -376,6 +379,7 @@ function DiscoverContent() {
           image_url,
           visibility,
           bookmark_count,
+          slug,
           profiles!catalogs_owner_id_fkey(username, avatar_url)
         `)
         .eq('visibility', 'public')
@@ -892,7 +896,7 @@ function DiscoverContent() {
                     ) : (
                       <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-6">
                         {catalogs.map((catalog) => (
-                          <div key={catalog.id} className="border-2 border-black/20 hover:border-black transition-all cursor-pointer" onClick={() => router.push(`/catalogs/${catalog.id}`)}>
+                          <div key={catalog.id} className="border-2 border-black/20 hover:border-black transition-all cursor-pointer" onClick={() => router.push(`/${catalog.owner?.username}/${catalog.slug}`)}>
                             <div className="aspect-square bg-black/5 overflow-hidden">
                               {catalog.image_url ? (
                                 <img src={catalog.image_url} alt={catalog.name} className="w-full h-full object-cover" />
@@ -910,8 +914,15 @@ function DiscoverContent() {
                                 <p className="text-sm opacity-60 mb-3 line-clamp-2">{catalog.description}</p>
                               )}
 
-                              <div className="flex items-center gap-2 mb-3">
-                                <div className="w-6 h-6 border border-black overflow-hidden">
+                              <div
+                                className="flex items-center gap-2 mb-3 cursor-pointer hover:opacity-70 transition-opacity"
+                                onClick={(e) => {
+                                  e.stopPropagation();
+                                  router.push(`/${catalog.owner?.username}`);
+                                }}
+                              >
+                                {/* Circular avatar */}
+                                <div className="w-6 h-6 rounded-full border border-black overflow-hidden">
                                   {catalog.owner?.avatar_url ? (
                                     <img src={catalog.owner.avatar_url} alt={catalog.owner.username} className="w-full h-full object-cover" />
                                   ) : (
@@ -921,9 +932,17 @@ function DiscoverContent() {
                                 <span className="text-xs tracking-wider" style={{ fontFamily: 'Bebas Neue, sans-serif' }}>@{catalog.owner?.username}</span>
                               </div>
 
-                              <div className="flex items-center justify-between text-[10px] tracking-wider opacity-60 mb-3">
-                                <span>{catalog.item_count} ITEMS</span>
-                                <span>🔖 {catalog.bookmark_count}</span>
+                              {/* More visible stats with full text */}
+                              <div className="flex items-center justify-between mb-3">
+                                <div className="flex items-center gap-1 text-xs tracking-wider font-black" style={{ fontFamily: 'Bebas Neue, sans-serif' }}>
+                                  <span>{catalog.item_count}</span>
+                                  <span className="opacity-60">ITEMS</span>
+                                </div>
+                                <div className="flex items-center gap-1 text-xs tracking-wider font-black" style={{ fontFamily: 'Bebas Neue, sans-serif' }}>
+                                  <span className="text-base">🔖</span>
+                                  <span>{catalog.bookmark_count}</span>
+                                  <span className="opacity-60">BOOKMARKS</span>
+                                </div>
                               </div>
 
                               <button
@@ -945,7 +964,7 @@ function DiscoverContent() {
                   </>
                 )}
 
-                {/* Profiles Tab */}
+                {/* Profiles Tab - Better pills */}
                 {activeTab === "profiles" && (
                   <>
                     {profiles.length === 0 ? (
@@ -953,70 +972,63 @@ function DiscoverContent() {
                         <p className="text-lg tracking-wider opacity-40" style={{ fontFamily: 'Bebas Neue, sans-serif' }}>NO PROFILES FOUND</p>
                       </div>
                     ) : (
-                      <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-6">
+                      <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
                         {profiles.map((profile) => {
                           const standingBadge = getStandingBadge(profile);
                           return (
-                            <div key={profile.id} className="border-2 border-black/20 hover:border-black transition-all cursor-pointer" onClick={() => router.push(`/profiles/${profile.id}`)}>
-                              <div className="p-6">
-                                <div className="flex items-start gap-4 mb-4">
-                                  <div className="w-16 h-16 md:w-20 md:h-20 border-2 border-black overflow-hidden flex-shrink-0">
-                                    {profile.avatar_url ? (
-                                      <img src={profile.avatar_url} alt={profile.username} className="w-full h-full object-cover" />
-                                    ) : (
-                                      <div className="w-full h-full bg-black/5 flex items-center justify-center">
-                                        <span className="text-2xl opacity-20">👤</span>
-                                      </div>
-                                    )}
-                                  </div>
-
-                                  <div className="flex-1 min-w-0">
-                                    <div className="flex items-center gap-2 mb-1">
-                                      <h3 className="text-xl font-black tracking-tighter" style={{ fontFamily: 'Archivo Black, sans-serif' }}>
-                                        @{profile.username}
-                                      </h3>
-                                      {profile.is_verified && (
-                                        <span className="text-blue-500 text-base">✓</span>
-                                      )}
+                            <div
+                              key={profile.id}
+                              className="border border-black/20 hover:border-black transition-all cursor-pointer"
+                              style={{ borderRadius: '50px' }}
+                              onClick={() => router.push(`/${profile.username}`)}
+                            >
+                              <div className="flex items-center gap-3 p-3">
+                                {/* Circular avatar */}
+                                <div className="w-14 h-14 md:w-16 md:h-16 rounded-full border border-black overflow-hidden flex-shrink-0">
+                                  {profile.avatar_url ? (
+                                    <img src={profile.avatar_url} alt={profile.username} className="w-full h-full object-cover" />
+                                  ) : (
+                                    <div className="w-full h-full bg-black/5 flex items-center justify-center">
+                                      <span className="text-xl opacity-20">👤</span>
                                     </div>
-                                    {profile.full_name && (
-                                      <p className="text-sm opacity-60 mb-2">{profile.full_name}</p>
-                                    )}
-                                    <div className="flex items-center gap-3 mb-2">
-                                      <span className="text-[10px] tracking-wider opacity-60">{profile.follower_count} FOLLOWERS</span>
-                                      {/* Compact standing badge */}
-                                      <div className={`px-2 py-0.5 ${standingBadge.bg} text-[9px] tracking-wider font-black`} style={{ fontFamily: 'Bebas Neue, sans-serif' }}>
-                                        {standingBadge.icon} {standingBadge.label}
-                                      </div>
-                                    </div>
-                                  </div>
+                                  )}
                                 </div>
 
-                                {profile.bio && (
-                                  <p className="text-sm opacity-60 mb-3 line-clamp-2">{profile.bio}</p>
-                                )}
-
-                                {/* Additional badges - only show if they exist */}
-                                {(profile.badges && profile.badges.length > 0) && (
-                                  <div className="flex flex-wrap gap-1.5">
-                                    {profile.badges.map((badge, idx) => {
+                                <div className="flex-1 min-w-0">
+                                  <div className="flex items-center gap-1.5 mb-0.5">
+                                    <h3 className="text-base md:text-lg font-black tracking-tighter truncate" style={{ fontFamily: 'Archivo Black, sans-serif' }}>
+                                      @{profile.username}
+                                    </h3>
+                                    {profile.is_verified && (
+                                      <span className="text-blue-500 text-sm flex-shrink-0">✓</span>
+                                    )}
+                                  </div>
+                                  {profile.full_name && (
+                                    <p className="text-xs opacity-60 mb-1.5 truncate">{profile.full_name}</p>
+                                  )}
+                                  <div className="flex items-center gap-1.5 flex-wrap">
+                                    <span className="text-[9px] tracking-wider opacity-60 flex-shrink-0">{profile.follower_count} FOLLOWERS</span>
+                                    <div className={`px-1.5 py-0.5 ${standingBadge.bg} text-[8px] tracking-wider font-black flex-shrink-0`} style={{ fontFamily: 'Bebas Neue, sans-serif' }}>
+                                      {standingBadge.icon} {standingBadge.label}
+                                    </div>
+                                    {(profile.badges && profile.badges.length > 0) && profile.badges.slice(0, 2).map((badge, idx) => {
                                       const badgeDisplay: Record<string, { label: string; bg: string }> = {
-                                        'early-adopter': { label: '🌟 EARLY', bg: 'bg-purple-500 text-white' },
-                                        'top-contributor': { label: '🏆 TOP', bg: 'bg-yellow-600 text-white' },
-                                        'influencer': { label: '📢 INFLUENCER', bg: 'bg-pink-500 text-white' },
-                                        'curator': { label: '🎨 CURATOR', bg: 'bg-indigo-500 text-white' },
-                                        'trendsetter': { label: '⚡ TREND', bg: 'bg-orange-500 text-white' },
-                                        'collector': { label: '💎 COLLECTOR', bg: 'bg-cyan-500 text-white' }
+                                        'early-adopter': { label: '🌟', bg: 'bg-purple-500 text-white' },
+                                        'top-contributor': { label: '🏆', bg: 'bg-yellow-600 text-white' },
+                                        'influencer': { label: '📢', bg: 'bg-pink-500 text-white' },
+                                        'curator': { label: '🎨', bg: 'bg-indigo-500 text-white' },
+                                        'trendsetter': { label: '⚡', bg: 'bg-orange-500 text-white' },
+                                        'collector': { label: '💎', bg: 'bg-cyan-500 text-white' }
                                       };
-                                      const badgeInfo = badgeDisplay[badge] || { label: badge.toUpperCase(), bg: 'bg-gray-500 text-white' };
+                                      const badgeInfo = badgeDisplay[badge] || { label: badge[0].toUpperCase(), bg: 'bg-gray-500 text-white' };
                                       return (
-                                        <div key={idx} className={`px-2 py-0.5 ${badgeInfo.bg} text-[9px] tracking-wider font-black`} style={{ fontFamily: 'Bebas Neue, sans-serif' }}>
+                                        <div key={idx} className={`px-1 py-0.5 ${badgeInfo.bg} text-[8px] flex-shrink-0`}>
                                           {badgeInfo.label}
                                         </div>
                                       );
                                     })}
                                   </div>
-                                )}
+                                </div>
                               </div>
                             </div>
                           );
@@ -1087,7 +1099,7 @@ function DiscoverContent() {
                       )}
 
                       <button
-                        onClick={() => router.push(`/catalogs/${expandedItem.catalog.id}`)}
+                        onClick={() => router.push(`/${expandedItem.catalog.owner.username}/${expandedItem.catalog.slug}`)}
                         className="w-full py-2 md:py-3 border border-black/20 hover:border-black hover:bg-black/10 transition-all text-[10px] md:text-xs tracking-[0.4em] font-black"
                         style={{ fontFamily: 'Bebas Neue, sans-serif' }}
                       >
