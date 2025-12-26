@@ -62,14 +62,27 @@ async function uploadImageToStorage(file: File, userId: string): Promise<{ url: 
 function extractSellerFromUrl(url: string): string {
   try {
     const urlObj = new URL(url);
-    let seller = urlObj.hostname.replace(/^www\./i, '');
-    const parts = seller.split('.');
-    if (parts.length >= 2) seller = parts[0];
+
+    // Get domain without www
+    let domain = urlObj.hostname.replace(/^www\./i, '');
+
+    // Get the main domain part (second-level domain)
+    // Examples:
+    // - "grailed.com" -> "grailed"
+    // - "depop.com" -> "depop"
+    // - "shop.nike.com" -> "nike"
+    // - "ssense.com" -> "ssense"
+    const parts = domain.split('.');
+    let seller = parts.length >= 2 ? parts[parts.length - 2] : parts[0];
+
+    // Capitalize first letter
     return seller.charAt(0).toUpperCase() + seller.slice(1);
   } catch {
     return '';
   }
 }
+
+
 
 export default function CatalogDetailPage() {
   const router = useRouter();
@@ -86,11 +99,9 @@ export default function CatalogDetailPage() {
   const [selectedItems, setSelectedItems] = useState<Set<string>>(new Set());
   const [expandedItem, setExpandedItem] = useState<CatalogItem | null>(null);
 
-  // Delete confirmation modal
   const [showDeleteModal, setShowDeleteModal] = useState(false);
   const [deleteCount, setDeleteCount] = useState(0);
 
-  // Add Item Modal
   const [showAddItemModal, setShowAddItemModal] = useState(false);
   const [itemTitle, setItemTitle] = useState('');
   const [itemImageUrl, setItemImageUrl] = useState('');
@@ -104,7 +115,6 @@ export default function CatalogDetailPage() {
   const [creatingStatus, setCreatingStatus] = useState('');
   const [imageError, setImageError] = useState('');
   const [productUrlError, setProductUrlError] = useState('');
-  const [checkingImage, setCheckingImage] = useState(false);
 
   const isOwner = currentUserId === catalog?.owner_id;
 
@@ -262,7 +272,6 @@ export default function CatalogDetailPage() {
     });
   }
 
-  // FIXED: Custom delete modal instead of browser confirm
   function deleteSelectedItems() {
     if (selectedItems.size === 0) return;
     setDeleteCount(selectedItems.size);
@@ -309,33 +318,22 @@ export default function CatalogDetailPage() {
     reader.readAsDataURL(file);
   }
 
-  // FIXED: Dynamic image URL verification
-  async function handleImageUrlChange(url: string) {
+  function handleImageUrlChange(url: string) {
     setItemImageUrl(url);
     setImageError('');
-    setCheckingImage(false);
 
-    if (!url.trim()) return;
+    if (!url.trim()) {
+      setPreviewUrl(null);
+      return;
+    }
 
-    // Validate URL format
     try {
       new URL(url);
+      setPreviewUrl(url);
     } catch {
       setImageError("Invalid URL format");
-      return;
+      setPreviewUrl(null);
     }
-
-    // Check if it's an image URL
-    const imageExtensions = ['.jpg', '.jpeg', '.png', '.gif', '.webp', '.bmp'];
-    const hasImageExtension = imageExtensions.some(ext => url.toLowerCase().includes(ext));
-
-    if (!hasImageExtension) {
-      setImageError("URL must point to an image file");
-      return;
-    }
-
-    // Set preview immediately
-    setPreviewUrl(url);
   }
 
   function handleProductUrlChange(url: string) {
@@ -360,10 +358,8 @@ export default function CatalogDetailPage() {
     setProductUrlError('');
     setUploadMethod('file');
     setCreatingStatus('');
-    setCheckingImage(false);
   }
 
-  // FIXED: Better error handling for mobile
   async function handleAddItem(e: React.FormEvent) {
     e.preventDefault();
 
@@ -377,7 +373,6 @@ export default function CatalogDetailPage() {
     setProductUrlError('');
 
     try {
-      // Validate product URL
       if (!itemProductUrl.trim()) {
         setProductUrlError('Product URL is required');
         setCreating(false);
@@ -394,7 +389,6 @@ export default function CatalogDetailPage() {
 
       let finalImageUrl = itemImageUrl;
 
-      // Upload file to Supabase Storage first (if file upload)
       if (uploadMethod === 'file' && selectedFile) {
         setCreatingStatus('Uploading image...');
         const uploadResult = await uploadImageToStorage(selectedFile, currentUserId);
@@ -415,8 +409,7 @@ export default function CatalogDetailPage() {
         return;
       }
 
-      // Call backend API
-      setCreatingStatus('Checking image & categorizing with AI...');
+      setCreatingStatus('Categorizing with AI...');
 
       const requestBody = {
         catalog_id: catalogId,
@@ -461,7 +454,6 @@ export default function CatalogDetailPage() {
       console.log('✅ Item created successfully!');
       console.log('AI Metadata:', result.metadata);
 
-      // Success!
       resetAddItemForm();
       setShowAddItemModal(false);
       await loadItems();
@@ -469,15 +461,12 @@ export default function CatalogDetailPage() {
     } catch (error: any) {
       console.error('❌ Error adding item:', error);
 
-      // User-friendly error messages
       let errorMessage = error.message || 'Failed to add item';
 
       if (errorMessage.includes('fetch')) {
         errorMessage = 'Cannot connect to server. Make sure backend is running.';
       } else if (errorMessage.includes('Network')) {
         errorMessage = 'Network error. Check your connection.';
-      } else if (errorMessage.includes('inappropriate')) {
-        errorMessage = 'Image contains inappropriate content';
       }
 
       setImageError(errorMessage);
@@ -525,7 +514,6 @@ export default function CatalogDetailPage() {
       `}</style>
 
       <div className="min-h-screen bg-white text-black pb-24 md:pb-0">
-        {/* Header */}
         <div className="border-b border-black/20 p-6 md:p-10">
           <div className="max-w-7xl mx-auto">
             <button onClick={() => router.back()} className="mb-6 text-xs tracking-wider opacity-60 hover:opacity-100 transition-opacity" style={{ fontFamily: 'Bebas Neue, sans-serif' }}>← BACK</button>
@@ -585,7 +573,6 @@ export default function CatalogDetailPage() {
           </div>
         </div>
 
-        {/* Items Grid */}
         <div className="p-6 md:p-10">
           <div className="max-w-7xl mx-auto">
             {items.length === 0 ? (
@@ -639,7 +626,6 @@ export default function CatalogDetailPage() {
           </div>
         </div>
 
-        {/* Expanded Item Modal */}
         {expandedItem && (
           <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-black/90 backdrop-blur-md" onClick={() => setExpandedItem(null)}>
             <div className="relative w-full max-w-sm md:max-w-3xl max-h-[85vh] md:max-h-[90vh]" onClick={(e) => e.stopPropagation()}>
@@ -670,7 +656,6 @@ export default function CatalogDetailPage() {
           </div>
         )}
 
-        {/* Add Item Modal */}
         {showAddItemModal && (
           <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-black/70 backdrop-blur-sm">
             <div className="w-full max-w-sm md:max-w-md relative">
@@ -750,7 +735,6 @@ export default function CatalogDetailPage() {
           </div>
         )}
 
-        {/* Delete Confirmation Modal */}
         {showDeleteModal && (
           <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-black/90 backdrop-blur-sm">
             <div className="w-full max-w-md bg-white border-2 border-black p-6 md:p-8">
@@ -769,7 +753,6 @@ export default function CatalogDetailPage() {
           </div>
         )}
 
-        {/* Login Message */}
         {showLoginMessage && (
           <div className="fixed top-24 left-1/2 -translate-x-1/2 md:top-auto md:bottom-6 md:right-6 md:left-auto md:translate-x-0 z-[9999] w-[calc(100%-2rem)] max-w-sm">
             <div className="bg-black border-2 border-white p-4 shadow-lg relative">
