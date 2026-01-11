@@ -13,6 +13,7 @@ type FeedPost = {
   music_preview_url: string | null;
   like_count: number;
   is_liked: boolean;
+  is_saved: boolean;
   comment_count: number;
   owner: {
     id: string;
@@ -42,6 +43,7 @@ export default function FeedPage() {
 
   const [swipeDirection, setSwipeDirection] = useState<'up' | 'down' | null>(null);
   const [isAnimating, setIsAnimating] = useState(false);
+  const [isFading, setIsFading] = useState(false);
   const [showToast, setShowToast] = useState(false);
   const [toastMessage, setToastMessage] = useState('');
   const [viewMode, setViewMode] = useState<'discover' | 'shop'>('discover');
@@ -147,6 +149,7 @@ export default function FeedPage() {
 
       // Get liked posts for current user
       let likedPostIds: Set<string> = new Set();
+      let savedPostIds: Set<string> = new Set();
       if (currentUserId) {
         const { data: likedData } = await supabase
           .from('liked_feed_posts')
@@ -155,6 +158,16 @@ export default function FeedPage() {
 
         if (likedData) {
           likedPostIds = new Set(likedData.map(like => like.feed_post_id));
+        }
+
+        // Get saved posts
+        const { data: savedData } = await supabase
+          .from('saved_feed_posts')
+          .select('feed_post_id')
+          .eq('user_id', currentUserId);
+
+        if (savedData) {
+          savedPostIds = new Set(savedData.map(save => save.feed_post_id));
         }
       }
 
@@ -169,7 +182,7 @@ export default function FeedPage() {
       if (currentUserId && itemsData) {
         const itemIds = itemsData.map(item => item.id);
         const { data: likedItemsData } = await supabase
-          .from('liked_items')
+          .from('liked_feed_post_items')
           .select('item_id')
           .eq('user_id', currentUserId)
           .in('item_id', itemIds);
@@ -201,7 +214,8 @@ export default function FeedPage() {
           caption: post.caption,
           music_preview_url: post.music_preview_url,
           like_count: post.like_count,
-          is_liked: likedPostIds.has(post.id), // Check if current user liked it
+          is_liked: likedPostIds.has(post.id),
+          is_saved: savedPostIds.has(post.id),
           comment_count: post.comment_count || 0,
           owner: {
             id: owner.id,
@@ -224,28 +238,28 @@ export default function FeedPage() {
   function nextPost() {
     if (currentIndex < posts.length - 1 && !isAnimating) {
       setIsAnimating(true);
-      setSwipeDirection('up');
-      setViewMode('discover');
+      setIsFading(true);
 
       setTimeout(() => {
+        setViewMode('discover');
         setCurrentIndex(prev => prev + 1);
-        setSwipeDirection(null);
-        setTimeout(() => setIsAnimating(false), 100);
-      }, 400);
+        setIsFading(false);
+        setTimeout(() => setIsAnimating(false), 50);
+      }, 200);
     }
   }
 
   function prevPost() {
     if (currentIndex > 0 && !isAnimating) {
       setIsAnimating(true);
-      setSwipeDirection('down');
-      setViewMode('discover');
+      setIsFading(true);
 
       setTimeout(() => {
+        setViewMode('discover');
         setCurrentIndex(prev => prev - 1);
-        setSwipeDirection(null);
-        setTimeout(() => setIsAnimating(false), 100);
-      }, 400);
+        setIsFading(false);
+        setTimeout(() => setIsAnimating(false), 50);
+      }, 200);
     }
   }
 
@@ -353,7 +367,7 @@ export default function FeedPage() {
     try {
       if (currentlyLiked) {
         const { error } = await supabase
-          .from('liked_items')
+          .from('liked_feed_post_items')
           .delete()
           .eq('user_id', currentUserId)
           .eq('item_id', itemId);
@@ -364,7 +378,7 @@ export default function FeedPage() {
         }
       } else {
         const { error } = await supabase
-          .from('liked_items')
+          .from('liked_feed_post_items')
           .insert({
             user_id: currentUserId,
             item_id: itemId
@@ -397,6 +411,60 @@ export default function FeedPage() {
     }
   }
 
+  async function toggleSave(postId: string, currentlySaved: boolean) {
+    if (!currentUserId || !isOnboarded) {
+      setToastMessage('Please log in to save posts');
+      setShowToast(true);
+      setTimeout(() => setShowToast(false), 3000);
+      return;
+    }
+
+    try {
+      if (currentlySaved) {
+        const { error } = await supabase
+          .from('saved_feed_posts')
+          .delete()
+          .eq('user_id', currentUserId)
+          .eq('feed_post_id', postId);
+
+        if (error) {
+          console.error('Unsave error:', error);
+          return;
+        }
+
+        setPosts(prev => prev.map(post =>
+          post.id === postId ? { ...post, is_saved: false } : post
+        ));
+
+        setToastMessage('Post removed from saved');
+        setShowToast(true);
+        setTimeout(() => setShowToast(false), 2000);
+      } else {
+        const { error } = await supabase
+          .from('saved_feed_posts')
+          .insert({
+            user_id: currentUserId,
+            feed_post_id: postId
+          });
+
+        if (error && !error.message.includes('duplicate')) {
+          console.error('Save error:', error);
+          return;
+        }
+
+        setPosts(prev => prev.map(post =>
+          post.id === postId ? { ...post, is_saved: true } : post
+        ));
+
+        setToastMessage('Post saved!');
+        setShowToast(true);
+        setTimeout(() => setShowToast(false), 2000);
+      }
+    } catch (error: any) {
+      console.error('Toggle save failed:', error);
+    }
+  }
+
   if (loading) {
     return (
       <div className="fixed inset-0 bg-black flex items-center justify-center">
@@ -426,11 +494,10 @@ export default function FeedPage() {
 
   const currentPost = posts[currentIndex];
 
-  // Get animation class based on swipe direction
+  // Get animation class based on fade state
   const getAnimationClass = () => {
-    if (swipeDirection === 'up') return 'swipe-up-exit';
-    if (swipeDirection === 'down') return 'swipe-down-exit';
-    return '';
+    if (isFading) return 'fade-out';
+    return 'fade-in-content';
   };
 
   // Safety check
@@ -474,31 +541,19 @@ export default function FeedPage() {
           to { opacity: 1; }
         }
 
+        @keyframes fadeOut {
+          from { opacity: 1; }
+          to { opacity: 0; }
+        }
+
+        @keyframes fadeInContent {
+          from { opacity: 0; transform: scale(0.98); }
+          to { opacity: 1; transform: scale(1); }
+        }
+
         @keyframes scroll {
           0% { transform: translateX(0); }
           100% { transform: translateX(-50%); }
-        }
-
-        @keyframes swipeUp {
-          0% {
-            transform: translateY(0) scale(1) rotateX(0deg);
-            opacity: 1;
-          }
-          100% {
-            transform: translateY(-100vh) scale(0.85) rotateX(8deg);
-            opacity: 0;
-          }
-        }
-
-        @keyframes swipeDown {
-          0% {
-            transform: translateY(0) scale(1) rotateX(0deg);
-            opacity: 1;
-          }
-          100% {
-            transform: translateY(100vh) scale(0.85) rotateX(-8deg);
-            opacity: 0;
-          }
         }
 
         .slide-up {
@@ -509,16 +564,16 @@ export default function FeedPage() {
           animation: fadeIn 0.3s ease-out;
         }
 
+        .fade-out {
+          animation: fadeOut 0.2s ease-out forwards;
+        }
+
+        .fade-in-content {
+          animation: fadeInContent 0.3s cubic-bezier(0.16, 1, 0.3, 1);
+        }
+
         .animate-scroll {
           animation: scroll 20s linear infinite;
-        }
-
-        .swipe-up-exit {
-          animation: swipeUp 0.4s cubic-bezier(0.4, 0.0, 0.2, 1) forwards;
-        }
-
-        .swipe-down-exit {
-          animation: swipeDown 0.4s cubic-bezier(0.4, 0.0, 0.2, 1) forwards;
         }
 
         .scrollbar-hide {
@@ -631,13 +686,32 @@ export default function FeedPage() {
                           style={{ animationDelay: `${idx * 0.05}s` }}
                         >
                           <div
-                            className="aspect-square bg-neutral-900 overflow-hidden cursor-pointer"
+                            className="aspect-square bg-neutral-900 overflow-hidden cursor-pointer relative"
                             onClick={(e) => {
                               e.stopPropagation();
                               if (item.product_url) window.open(item.product_url, '_blank');
                             }}
                           >
                             <img src={item.image_url} alt={item.title} className="w-full h-full object-cover hover:scale-105 transition-transform" />
+
+                            {/* Like Button Overlay */}
+                            <button
+                              onClick={(e) => {
+                                e.stopPropagation();
+                                toggleItemLike(item.id, item.is_liked);
+                              }}
+                              className="absolute top-2 right-2 w-8 h-8 bg-black/60 backdrop-blur-sm rounded-full flex items-center justify-center hover:bg-black/80 transition-colors"
+                            >
+                              <svg
+                                className="w-4 h-4 text-white"
+                                fill={item.is_liked ? 'currentColor' : 'none'}
+                                viewBox="0 0 24 24"
+                                stroke="currentColor"
+                                strokeWidth={2}
+                              >
+                                <path strokeLinecap="round" strokeLinejoin="round" d="M4.318 6.318a4.5 4.5 0 000 6.364L12 20.364l7.682-7.682a4.5 4.5 0 00-6.364-6.364L12 7.636l-1.318-1.318a4.5 4.5 0 00-6.364 0z" />
+                              </svg>
+                            </button>
                           </div>
 
                           <div className="p-3 bg-black border-t border-white/20">
@@ -651,11 +725,25 @@ export default function FeedPage() {
                               {item.title}
                             </h3>
 
-                            {item.price && (
-                              <p className="text-base font-black text-white mb-3" style={{ fontFamily: 'Archivo Black' }}>
-                                ${item.price}
-                              </p>
-                            )}
+                            <div className="flex items-center justify-between mb-3">
+                              {item.price && (
+                                <p className="text-base font-black text-white" style={{ fontFamily: 'Archivo Black' }}>
+                                  ${item.price}
+                                </p>
+                              )}
+
+                              {/* Like Count */}
+                              {item.like_count > 0 && (
+                                <div className="flex items-center gap-1">
+                                  <svg className="w-3 h-3 text-white/60" fill="currentColor" viewBox="0 0 24 24">
+                                    <path d="M12 21.35l-1.45-1.32C5.4 15.36 2 12.28 2 8.5 2 5.42 4.42 3 7.5 3c1.74 0 3.41.81 4.5 2.09C13.09 3.81 14.76 3 16.5 3 19.58 3 22 5.42 22 8.5c0 3.78-3.4 6.86-8.55 11.54L12 21.35z"/>
+                                  </svg>
+                                  <span className="text-xs text-white/60 font-black" style={{ fontFamily: 'Bebas Neue' }}>
+                                    {item.like_count}
+                                  </span>
+                                </div>
+                              )}
+                            </div>
 
                             {item.product_url && (
                               <button
@@ -753,6 +841,16 @@ export default function FeedPage() {
             >
               <svg className="w-6 h-6" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2}>
                 <path strokeLinecap="round" strokeLinejoin="round" d="M4 12v8a2 2 0 002 2h12a2 2 0 002-2v-8M16 6l-4-4m0 0L8 6m4-4v13" />
+              </svg>
+            </button>
+
+            {/* Save/Bookmark Button */}
+            <button
+              onClick={() => toggleSave(currentPost.id, currentPost.is_saved)}
+              className="ml-auto flex items-center gap-2 text-white hover:scale-110 transition-transform"
+            >
+              <svg className="w-6 h-6" fill={currentPost.is_saved ? 'currentColor' : 'none'} viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2}>
+                <path strokeLinecap="round" strokeLinejoin="round" d="M5 5a2 2 0 012-2h10a2 2 0 012 2v16l-7-3.5L5 21V5z" />
               </svg>
             </button>
           </div>
