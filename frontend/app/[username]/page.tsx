@@ -198,6 +198,7 @@ export default function ProfilePage() {
   const [currentUserId, setCurrentUserId] = useState<string | null>(null);
   const [activeTab, setActiveTab] = useState<'posts' | 'catalogs' | 'bookmarks' | 'liked' | 'saved'>('posts');
   const [expandedItem, setExpandedItem] = useState<LikedItem | null>(null);
+  const [expandedLikedItem, setExpandedLikedItem] = useState<LikedItem | null>(null);
 
   // Edit Profile Modal
   const [showEditModal, setShowEditModal] = useState(false);
@@ -535,75 +536,112 @@ export default function ProfilePage() {
     if (!profileId) return;
 
     try {
-      const { data, error } = await supabase
+      // Load liked catalog items
+      const { data: catalogLikes, error: catalogError } = await supabase
         .from('liked_items')
         .select('item_id, created_at')
         .eq('user_id', profileId);
 
-      if (error || !data) {
-        console.error('Error loading likes:', error);
+      // Load liked feed post items
+      const { data: feedPostLikes, error: feedError } = await supabase
+        .from('liked_feed_post_items')
+        .select('item_id, created_at')
+        .eq('user_id', profileId);
+
+      if (catalogError || feedError) {
+        console.error('Error loading likes:', catalogError || feedError);
         return;
       }
 
-      const itemIds = data.map(l => l.item_id);
+      // Combine both types of liked items
+      const catalogItemIds = catalogLikes?.map(l => l.item_id) || [];
+      const feedItemIds = feedPostLikes?.map(l => l.item_id) || [];
 
-      if (itemIds.length === 0) {
-        setLikedItems([]);
-        return;
+      const transformedItems: LikedItem[] = [];
+
+      // Process catalog items
+      if (catalogItemIds.length > 0) {
+        const { data: catalogItemsData, error: catalogItemsError } = await supabase
+          .from('catalog_items')
+          .select('id, title, image_url, product_url, price, seller, catalog_id, like_count')
+          .in('id', catalogItemIds);
+
+        if (!catalogItemsError && catalogItemsData) {
+          const catalogIds = [...new Set(catalogItemsData.map(i => i.catalog_id))];
+          const { data: catalogsData } = await supabase
+            .from('catalogs')
+            .select('id, name, owner_id, visibility, slug')
+            .in('id', catalogIds);
+
+          const catalogsMap = new Map(catalogsData?.map(c => [c.id, c]) || []);
+
+          const ownerIds = [...new Set(catalogsData?.map(c => c.owner_id) || [])];
+          const { data: ownersData } = await supabase
+            .from('profiles')
+            .select('id, username')
+            .in('id', ownerIds);
+
+          const ownersMap = new Map(ownersData?.map(o => [o.id, o]) || []);
+
+          catalogItemsData
+            .filter(item => {
+              const catalog = catalogsMap.get(item.catalog_id);
+              return catalog?.visibility === 'public';
+            })
+            .forEach(item => {
+              const catalog = catalogsMap.get(item.catalog_id);
+              const owner = catalog ? ownersMap.get(catalog.owner_id) : null;
+              const like = catalogLikes?.find(l => l.item_id === item.id);
+
+              transformedItems.push({
+                id: item.id,
+                title: item.title,
+                image_url: item.image_url,
+                product_url: item.product_url,
+                price: item.price,
+                seller: item.seller,
+                catalog_id: item.catalog_id,
+                catalog_name: catalog?.name || 'Unknown',
+                catalog_owner: owner?.username || 'unknown',
+                catalog_slug: catalog?.slug || '',
+                like_count: item.like_count || 0,
+                created_at: like?.created_at || '',
+              });
+            });
+        }
       }
 
-      const { data: itemsData, error: itemsError } = await supabase
-        .from('catalog_items')
-        .select('id, title, image_url, product_url, price, seller, catalog_id, like_count')
-        .in('id', itemIds);
+      // Process feed post items
+      if (feedItemIds.length > 0) {
+        const { data: feedItemsData, error: feedItemsError } = await supabase
+          .from('feed_post_items')
+          .select('id, title, image_url, product_url, price, seller, feed_post_id, like_count')
+          .in('id', feedItemIds);
 
-      if (itemsError || !itemsData) {
-        console.error('Error loading item details:', itemsError);
-        return;
+        if (!feedItemsError && feedItemsData) {
+          feedItemsData.forEach(item => {
+            const like = feedPostLikes?.find(l => l.item_id === item.id);
+
+            transformedItems.push({
+              id: item.id,
+              title: item.title,
+              image_url: item.image_url,
+              product_url: item.product_url,
+              price: item.price,
+              seller: item.seller,
+              catalog_id: item.feed_post_id, // Using feed_post_id as catalog_id
+              catalog_name: 'Feed Post',
+              catalog_owner: 'feed',
+              catalog_slug: item.feed_post_id,
+              like_count: item.like_count || 0,
+              created_at: like?.created_at || '',
+            });
+          });
+        }
       }
 
-      const catalogIds = [...new Set(itemsData.map(i => i.catalog_id))];
-      const { data: catalogsData } = await supabase
-        .from('catalogs')
-        .select('id, name, owner_id, visibility, slug')
-        .in('id', catalogIds);
-
-      const catalogsMap = new Map(catalogsData?.map(c => [c.id, c]) || []);
-
-      const ownerIds = [...new Set(catalogsData?.map(c => c.owner_id) || [])];
-      const { data: ownersData } = await supabase
-        .from('profiles')
-        .select('id, username')
-        .in('id', ownerIds);
-
-      const ownersMap = new Map(ownersData?.map(o => [o.id, o]) || []);
-
-      const transformedItems: LikedItem[] = itemsData
-        .filter(item => {
-          const catalog = catalogsMap.get(item.catalog_id);
-          return catalog?.visibility === 'public';
-        })
-        .map(item => {
-          const catalog = catalogsMap.get(item.catalog_id);
-          const owner = catalog ? ownersMap.get(catalog.owner_id) : null;
-          const like = data.find(l => l.item_id === item.id);
-
-          return {
-            id: item.id,
-            title: item.title,
-            image_url: item.image_url,
-            product_url: item.product_url,
-            price: item.price,
-            seller: item.seller,
-            catalog_id: item.catalog_id,
-            catalog_name: catalog?.name || 'Unknown',
-            catalog_owner: owner?.username || 'unknown',
-            catalog_slug: catalog?.slug || '',
-            like_count: item.like_count || 0,
-            created_at: like?.created_at || '',
-          };
-        })
-        .sort((a, b) => new Date(b.created_at).getTime() - new Date(a.created_at).getTime());
+      // Sort all items by created_at (most recent first)
+      transformedItems.sort((a, b) => new Date(b.created_at).getTime() - new Date(a.created_at).getTime());
 
       setLikedItems(transformedItems);
     } catch (error) {
@@ -1484,8 +1522,111 @@ export default function ProfilePage() {
               </div>
             )}
 
-            {/* Bookmarked Catalogs and Liked Items tabs remain the same as before... */}
-            {/* I'll continue in the next message due to length */}
+            {/* Bookmarked Catalogs Tab */}
+            {activeTab === 'bookmarks' && (
+              <div className="space-y-6">
+                {bookmarkedCatalogs.length === 0 ? (
+                  <div className="text-center py-20">
+                    <p className="text-lg tracking-wider opacity-40" style={{ fontFamily: 'Bebas Neue, sans-serif' }}>
+                      NO BOOKMARKED CATALOGS YET
+                    </p>
+                    <p className="text-sm tracking-wide opacity-30 mt-2">
+                      {isOwner ? "You haven't bookmarked any catalogs yet" : "This user hasn't bookmarked any catalogs yet"}
+                    </p>
+                  </div>
+                ) : (
+                  <div className="grid grid-cols-2 md:grid-cols-3 lg:grid-cols-4 gap-3 md:gap-4">
+                    {bookmarkedCatalogs.map(catalog => (
+                      <div
+                        key={catalog.id}
+                        className="border border-white/20 hover:border-white transition-all cursor-pointer group"
+                        onClick={() => router.push(`/${catalog.username}/${catalog.slug}`)}
+                      >
+                        <div className="aspect-square bg-white/5 overflow-hidden">
+                          {catalog.image_url ? (
+                            <img src={catalog.image_url} alt={catalog.name} className="w-full h-full object-cover group-hover:scale-105 transition-transform" />
+                          ) : (
+                            <div className="w-full h-full flex items-center justify-center">
+                              <span className="text-4xl md:text-6xl opacity-10">✦</span>
+                            </div>
+                          )}
+                        </div>
+                        <div className="p-3 md:p-4 space-y-2">
+                          <h3 className="text-sm md:text-base font-black tracking-wide uppercase truncate" style={{ fontFamily: 'Bebas Neue, sans-serif' }}>
+                            {catalog.name}
+                          </h3>
+                          <div className="flex items-center gap-2 text-xs opacity-60">
+                            <span>@{catalog.username}</span>
+                          </div>
+                          <div className="flex items-center justify-between text-xs opacity-60">
+                            <span>{catalog.item_count} items</span>
+                            <span>🔖 {catalog.bookmark_count}</span>
+                          </div>
+                        </div>
+                      </div>
+                    ))}
+                  </div>
+                )}
+              </div>
+            )}
+
+            {/* Liked Items Tab */}
+            {activeTab === 'liked' && (
+              <div className="space-y-6">
+                {likedItems.length === 0 ? (
+                  <div className="text-center py-20">
+                    <p className="text-lg tracking-wider opacity-40" style={{ fontFamily: 'Bebas Neue, sans-serif' }}>
+                      NO LIKED ITEMS YET
+                    </p>
+                    <p className="text-sm tracking-wide opacity-30 mt-2">
+                      {isOwner ? "You haven't liked any items yet" : "This user hasn't liked any items yet"}
+                    </p>
+                  </div>
+                ) : (
+                  <div className="grid grid-cols-2 md:grid-cols-3 lg:grid-cols-4 gap-3 md:gap-4">
+                    {likedItems.map(item => (
+                      <div
+                        key={item.id}
+                        className="border border-white/20 hover:border-white transition-all group"
+                      >
+                        <div
+                          className="aspect-square bg-white/5 overflow-hidden cursor-pointer"
+                          onClick={() => setExpandedLikedItem(item)}
+                        >
+                          <img src={item.image_url} alt={item.title} className="w-full h-full object-cover group-hover:scale-105 transition-transform" />
+                        </div>
+                        <div className="p-3 space-y-2">
+                          <h3 className="text-xs md:text-sm font-black tracking-wide uppercase truncate leading-tight" style={{ fontFamily: 'Bebas Neue, sans-serif' }}>
+                            {item.title}
+                          </h3>
+                          {item.seller && (
+                            <p className="text-[10px] md:text-xs opacity-60 truncate">{item.seller}</p>
+                          )}
+                          {item.price && (
+                            <p className="text-xs md:text-sm font-black tracking-wide" style={{ fontFamily: 'Bebas Neue, sans-serif' }}>
+                              ${item.price}
+                            </p>
+                          )}
+                          <div className="flex items-center justify-between text-[10px] opacity-60">
+                            <span>♥ {item.like_count}</span>
+                            <button
+                              onClick={(e) => {
+                                e.stopPropagation();
+                                setExpandedLikedItem(item);
+                              }}
+                              className="hover:opacity-100 transition-opacity uppercase tracking-wider font-black"
+                              style={{ fontFamily: 'Bebas Neue, sans-serif' }}
+                            >
+                              VIEW
+                            </button>
+                          </div>
+                        </div>
+                      </div>
+                    ))}
+                  </div>
+                )}
+              </div>
+            )}
 
           </div>
         </div>
@@ -1703,6 +1844,100 @@ export default function ProfilePage() {
 
         {/* Followers/Following Modal - Add back from original */}
         {/* Expanded Item Modal - Add back from original */}
+
+        {/* Expanded Liked Item Modal */}
+        {expandedLikedItem && (
+          <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-black/90 backdrop-blur-md" onClick={() => setExpandedLikedItem(null)}>
+            <div className="relative w-full max-w-sm md:max-w-3xl max-h-[85vh] md:max-h-[90vh]" onClick={(e) => e.stopPropagation()}>
+              <button
+                onClick={() => setExpandedLikedItem(null)}
+                className="absolute -top-8 md:-top-12 right-0 text-white text-xs tracking-[0.4em] hover:opacity-50"
+                style={{ fontFamily: 'Bebas Neue, sans-serif' }}
+              >
+                [ESC]
+              </button>
+
+              <div className="bg-white border-2 border-white overflow-hidden">
+                <div className="grid md:grid-cols-2 gap-0">
+                  {/* Image */}
+                  <div
+                    className="aspect-square bg-black/5 overflow-hidden cursor-pointer"
+                    onClick={() => {
+                      if (expandedLikedItem.product_url) window.open(expandedLikedItem.product_url, '_blank');
+                    }}
+                  >
+                    <img
+                      src={expandedLikedItem.image_url}
+                      alt={expandedLikedItem.title}
+                      className="w-full h-full object-contain"
+                    />
+                  </div>
+
+                  {/* Details */}
+                  <div className="p-4 md:p-8 space-y-3 md:space-y-6">
+                    <h2 className="text-xl md:text-3xl font-black tracking-tighter" style={{ fontFamily: 'Archivo Black, sans-serif' }}>
+                      {expandedLikedItem.title}
+                    </h2>
+
+                    {expandedLikedItem.seller && (
+                      <p className="text-xs md:text-sm tracking-wider opacity-60">
+                        SELLER: {expandedLikedItem.seller}
+                      </p>
+                    )}
+
+                    {expandedLikedItem.price && (
+                      <p className="text-lg md:text-2xl font-black tracking-wide" style={{ fontFamily: 'Bebas Neue, sans-serif' }}>
+                        ${expandedLikedItem.price}
+                      </p>
+                    )}
+
+                    <div className="flex items-center gap-2 text-xs tracking-wider opacity-60">
+                      <span>♥ {expandedLikedItem.like_count} likes</span>
+                    </div>
+
+                    <div className="space-y-2 md:space-y-3">
+                      {/* View Product Button */}
+                      {expandedLikedItem.product_url && (
+                        <button
+                          onClick={() => window.open(expandedLikedItem.product_url!, '_blank')}
+                          className="w-full py-2 md:py-3 bg-black text-white hover:bg-white hover:text-black hover:border-2 hover:border-black transition-all text-[10px] md:text-xs tracking-[0.4em] font-black"
+                          style={{ fontFamily: 'Bebas Neue, sans-serif' }}
+                        >
+                          VIEW PRODUCT ↗
+                        </button>
+                      )}
+
+                      {/* Navigate to Source (Post or Catalog) */}
+                      {expandedLikedItem.catalog_name === 'Feed Post' ? (
+                        <button
+                          onClick={() => {
+                            setExpandedLikedItem(null);
+                            router.push(`/post/${expandedLikedItem.catalog_slug}`);
+                          }}
+                          className="w-full py-2 md:py-3 border-2 border-black hover:bg-black hover:text-white transition-all text-[10px] md:text-xs tracking-[0.4em] font-black"
+                          style={{ fontFamily: 'Bebas Neue, sans-serif' }}
+                        >
+                          VIEW POST →
+                        </button>
+                      ) : (
+                        <button
+                          onClick={() => {
+                            setExpandedLikedItem(null);
+                            router.push(`/${expandedLikedItem.catalog_owner}/${expandedLikedItem.catalog_slug}`);
+                          }}
+                          className="w-full py-2 md:py-3 border-2 border-black hover:bg-black hover:text-white transition-all text-[10px] md:text-xs tracking-[0.4em] font-black"
+                          style={{ fontFamily: 'Bebas Neue, sans-serif' }}
+                        >
+                          VIEW CATALOG: {expandedLikedItem.catalog_name}
+                        </button>
+                      )}
+                    </div>
+                  </div>
+                </div>
+              </div>
+            </div>
+          </div>
+        )}
       </div>
     </>
   );
