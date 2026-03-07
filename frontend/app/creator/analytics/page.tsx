@@ -3,833 +3,722 @@
 import { useEffect, useState } from "react";
 import { supabase } from "@/lib/supabase/client";
 import { useRouter } from "next/navigation";
-import Head from "next/head";
 
-type CatalogItem = {
-  id: string;
-  title: string;
-  image_url: string;
-  product_url: string | null;
-  price: string | null;
-  seller: string | null;
-  like_count: number;
-  catalog_name: string;
-  created_at: string;
-};
+type Tab = "overview" | "catalogs" | "items" | "monetization";
 
-type PostItem = {
-  id: string;
-  title: string;
-  image_url: string;
-  product_url: string | null;
-  price: string | null;
-  seller: string | null;
-  like_count: number;
-  post_caption: string | null;
-  created_at: string;
-};
+// Partner brands eligible for verification
+const PARTNER_BRANDS = [
+  "nike", "adidas", "supreme", "the north face", "patagonia",
+  "stone island", "arc'teryx", "carhartt", "levi's", "uniqlo",
+  "zara", "h&m", "ralph lauren", "tommy hilfiger", "calvin klein"
+];
 
-type Catalog = {
+type CatalogData = {
   id: string;
   name: string;
   slug: string;
-  description: string | null;
-  image_url: string;
-  item_count: number;
-  visibility: string;
-  created_at: string;
-};
-
-type Post = {
-  id: string;
-  caption: string | null;
-  image_url: string;
-  like_count: number;
-  comment_count: number;
-  created_at: string;
-};
-
-type Stats = {
-  totalFollowers: number;
-  totalCatalogs: number;
-  totalPosts: number;
-  totalCatalogItems: number;
-  totalPostItems: number;
-  totalLikesReceived: number;
+  image: string;
+  totalItems: number;
+  totalLikes: number;
   totalBookmarks: number;
+  totalClicks: number;
+  uniqueClicks: number;
+  engagementScore: number;
 };
 
-export default function CreatorAnalyticsPage() {
+type ItemData = {
+  id: string;
+  title: string;
+  image: string;
+  catalogName: string;
+  catalogSlug: string;
+  seller: string | null;
+  brand: string | null;
+  likes: number;
+  clicks: number;
+  uniqueClicks: number;
+  isVerified: boolean;
+  isMonetized: boolean;
+  canVerify: boolean;
+  verificationStatus: string | null;
+  productUrl: string | null;
+  affiliateLink: string | null;
+};
+
+type VerificationRequest = {
+  id: string;
+  itemId: string;
+  itemType: "catalog" | "feed";
+  brandName: string;
+  status: "pending" | "approved" | "rejected";
+  createdAt: string;
+  item: {
+    title: string;
+    image: string;
+    seller: string;
+  };
+};
+
+export default function AnalyticsPage() {
   const router = useRouter();
   const [loading, setLoading] = useState(true);
-  const [currentUser, setCurrentUser] = useState<any>(null);
+  const [currentUserId, setCurrentUserId] = useState<string | null>(null);
   const [isVerified, setIsVerified] = useState(false);
   const [hasApplied, setHasApplied] = useState(false);
   const [applying, setApplying] = useState(false);
+  const [activeTab, setActiveTab] = useState<Tab>("overview");
 
-  // Stats
-  const [stats, setStats] = useState<Stats>({
+  const [stats, setStats] = useState({
     totalFollowers: 0,
     totalCatalogs: 0,
-    totalPosts: 0,
-    totalCatalogItems: 0,
-    totalPostItems: 0,
-    totalLikesReceived: 0,
+    totalItems: 0,
+    totalLikes: 0,
     totalBookmarks: 0,
+    totalClicks: 0,
+    uniqueClicks: 0,
+    clickThroughRate: 0,
+    avgEngagement: 0,
+    totalReach: 0,
+    verifiedItems: 0,
+    monetizedItems: 0,
   });
 
-  // Data
-  const [catalogs, setCatalogs] = useState<Catalog[]>([]);
-  const [posts, setPosts] = useState<Post[]>([]);
-  const [catalogItems, setCatalogItems] = useState<CatalogItem[]>([]);
-  const [postItems, setPostItems] = useState<PostItem[]>([]);
-
-  // UI State
-  const [activeTab, setActiveTab] = useState<'overview' | 'catalogs' | 'posts' | 'items' | 'affiliate'>('overview');
+  const [catalogs, setCatalogs] = useState<CatalogData[]>([]);
+  const [items, setItems] = useState<ItemData[]>([]);
+  const [verificationRequests, setVerificationRequests] = useState<VerificationRequest[]>([]);
+  const [sortBy, setSortBy] = useState<"clicks" | "likes" | "engagement">("clicks");
 
   useEffect(() => {
-    loadUserData();
+    loadUser();
   }, []);
 
-  async function loadUserData() {
-    setLoading(true);
+  useEffect(() => {
+    if (currentUserId && isVerified) {
+      loadAnalytics();
+    }
+  }, [currentUserId, isVerified]);
 
+  async function loadUser() {
     const { data: { user } } = await supabase.auth.getUser();
     if (!user) {
-      router.push('/');
+      router.push("/login");
       return;
     }
 
-    // Get profile info
     const { data: profile } = await supabase
-      .from('profiles')
-      .select('is_verified, username, avatar_url, full_name')
-      .eq('id', user.id)
+      .from("profiles")
+      .select("is_verified, username, is_onboarded")
+      .eq("id", user.id)
       .single();
 
-    if (profile) {
-      setCurrentUser(profile);
-      setIsVerified(profile.is_verified || false);
+    if (!profile?.is_onboarded) {
+      router.push("/");
+      return;
     }
 
-    // Check if user has applied for verification
-    const { data: application } = await supabase
-      .from('verification_requests')
-      .select('status')
-      .eq('user_id', user.id)
-      .single();
+    setCurrentUserId(user.id);
+    setIsVerified(profile?.is_verified || false);
 
-    if (application) {
-      setHasApplied(true);
-    }
+    if (!profile?.is_verified) {
+      const { data: application } = await supabase
+        .from("verification_requests")
+        .select("status")
+        .eq("user_id", user.id)
+        .single();
 
-    if (profile?.is_verified) {
-      await loadAnalyticsData(user.id);
+      if (application) {
+        setHasApplied(true);
+      }
     }
 
     setLoading(false);
   }
 
-  async function loadAnalyticsData(userId: string) {
-    // Load followers count
-    const { count: followersCount } = await supabase
-      .from('followers')
-      .select('*', { count: 'exact', head: true })
-      .eq('following_id', userId);
+  async function loadAnalytics() {
+    setLoading(true);
+    try {
+      // Get follower count
+      const { count: followerCount } = await supabase
+        .from("follows")
+        .select("*", { count: "exact", head: true })
+        .eq("following_id", currentUserId);
 
-    // Load catalogs
-    const { data: catalogsData, count: catalogsCount } = await supabase
-      .from('catalogs')
-      .select('id, name, slug, description, image_url, visibility, created_at', { count: 'exact' })
-      .eq('owner_id', userId)
-      .order('created_at', { ascending: false });
+      // Get catalogs
+      const { data: catalogsData } = await supabase
+        .from("catalogs")
+        .select("id, name, slug, image_url")
+        .eq("owner_id", currentUserId);
 
-    // Get item counts for each catalog
-    const catalogsWithCounts = await Promise.all(
-      (catalogsData || []).map(async (catalog) => {
-        const { count } = await supabase
-          .from('catalog_items')
-          .select('*', { count: 'exact', head: true })
-          .eq('catalog_id', catalog.id);
+      // Get catalog stats
+      const catalogStats = await Promise.all(
+        (catalogsData || []).map(async (catalog) => {
+          const { data: catalogItems } = await supabase
+            .from("catalog_items")
+            .select("id, image_url, like_count, click_count, unique_click_count")
+            .eq("catalog_id", catalog.id);
 
-        return { ...catalog, item_count: count || 0 };
-      })
-    );
+          const { count: bookmarks } = await supabase
+            .from("bookmarked_catalogs")
+            .select("*", { count: "exact", head: true })
+            .eq("catalog_id", catalog.id);
 
-    setCatalogs(catalogsWithCounts);
+          const totalLikes = catalogItems?.reduce((sum, i) => sum + (i.like_count || 0), 0) || 0;
+          const totalClicks = catalogItems?.reduce((sum, i) => sum + (i.click_count || 0), 0) || 0;
+          const totalUniqueClicks = catalogItems?.reduce((sum, i) => sum + (i.unique_click_count || 0), 0) || 0;
 
-    // Load posts
-    const { data: postsData, count: postsCount } = await supabase
-      .from('feed_posts')
-      .select('id, caption, image_url, like_count, comment_count, created_at', { count: 'exact' })
-      .eq('owner_id', userId)
-      .order('created_at', { ascending: false });
+          return {
+            id: catalog.id,
+            name: catalog.name,
+            slug: catalog.slug,
+            image: catalogItems?.[0]?.image_url || catalog.image_url || "",
+            totalItems: catalogItems?.length || 0,
+            totalLikes,
+            totalBookmarks: bookmarks || 0,
+            totalClicks,
+            uniqueClicks: totalUniqueClicks,
+            engagementScore: totalLikes + (bookmarks || 0) * 2 + totalClicks * 1.5,
+          };
+        })
+      );
 
-    setPosts(postsData || []);
+      setCatalogs(catalogStats);
 
-    // Load catalog items with catalog names
-    const { data: catalogItemsData, count: catalogItemsCount } = await supabase
-      .from('catalog_items')
-      .select(`
-        id,
-        title,
-        image_url,
-        product_url,
-        price,
-        seller,
-        created_at,
-        catalogs!inner(name, owner_id)
-      `, { count: 'exact' })
-      .eq('catalogs.owner_id', userId)
-      .order('created_at', { ascending: false })
-      .limit(50);
+      // Get all items with verification status
+      const { data: allItems } = await supabase
+        .from("catalog_items")
+        .select(`
+          id,
+          title,
+          image_url,
+          seller,
+          brand,
+          like_count,
+          click_count,
+          unique_click_count,
+          is_verified,
+          is_monetized,
+          product_url,
+          affiliate_link,
+          catalogs!inner(owner_id, name, slug)
+        `)
+        .eq("catalogs.owner_id", currentUserId);
 
-    // Get like counts for catalog items
-    const catalogItemsWithLikes = await Promise.all(
-      (catalogItemsData || []).map(async (item: any) => {
-        const { count } = await supabase
-          .from('liked_catalog_items')
-          .select('*', { count: 'exact', head: true })
-          .eq('item_id', item.id);
+      // Get verification requests for these items
+      const itemIds = allItems?.map(i => i.id) || [];
+      const { data: requests } = await supabase
+        .from("item_verification_requests")
+        .select("*")
+        .in("item_id", itemIds)
+        .eq("item_type", "catalog");
 
-        return {
-          id: item.id,
-          title: item.title,
-          image_url: item.image_url,
-          product_url: item.product_url,
-          price: item.price,
-          seller: item.seller,
-          like_count: count || 0,
-          catalog_name: item.catalogs.name,
-          created_at: item.created_at,
-        };
-      })
-    );
-
-    setCatalogItems(catalogItemsWithLikes);
-
-    // Load post items
-    const { data: postItemsData, count: postItemsCount } = await supabase
-      .from('feed_post_items')
-      .select(`
-        id,
-        title,
-        image_url,
-        product_url,
-        price,
-        seller,
-        created_at,
-        feed_posts!inner(owner_id, caption)
-      `, { count: 'exact' })
-      .eq('feed_posts.owner_id', userId)
-      .order('created_at', { ascending: false })
-      .limit(50);
-
-    // Get like counts for post items
-    const postItemsWithLikes = await Promise.all(
-      (postItemsData || []).map(async (item: any) => {
-        const { count } = await supabase
-          .from('liked_feed_post_items')
-          .select('*', { count: 'exact', head: true })
-          .eq('item_id', item.id);
+      const itemsWithStatus = allItems?.map((item: any) => {
+        const brandName = item.seller || item.brand || "";
+        const canVerify = PARTNER_BRANDS.some(b => brandName.toLowerCase().includes(b));
+        const request = requests?.find(r => r.item_id === item.id);
 
         return {
           id: item.id,
           title: item.title,
-          image_url: item.image_url,
-          product_url: item.product_url,
-          price: item.price,
+          image: item.image_url,
+          catalogName: item.catalogs.name,
+          catalogSlug: item.catalogs.slug,
           seller: item.seller,
-          like_count: count || 0,
-          post_caption: item.feed_posts.caption,
-          created_at: item.created_at,
+          brand: item.brand,
+          likes: item.like_count || 0,
+          clicks: item.click_count || 0,
+          uniqueClicks: item.unique_click_count || 0,
+          isVerified: item.is_verified || false,
+          isMonetized: item.is_monetized || false,
+          canVerify,
+          verificationStatus: request?.status || null,
+          productUrl: item.product_url,
+          affiliateLink: item.affiliate_link,
         };
-      })
-    );
+      }) || [];
 
-    setPostItems(postItemsWithLikes);
+      setItems(itemsWithStatus);
 
-    // Calculate total likes received
-    const totalCatalogItemLikes = catalogItemsWithLikes.reduce((sum, item) => sum + item.like_count, 0);
-    const totalPostItemLikes = postItemsWithLikes.reduce((sum, item) => sum + item.like_count, 0);
-    const totalPostLikes = (postsData || []).reduce((sum: number, post: any) => sum + (post.like_count || 0), 0);
+      // Load verification requests
+      const { data: allRequests } = await supabase
+        .from("item_verification_requests")
+        .select(`
+          id,
+          item_id,
+          item_type,
+          brand_name,
+          status,
+          created_at,
+          catalog_items!inner(title, image_url, seller)
+        `)
+        .eq("user_id", currentUserId)
+        .eq("item_type", "catalog")
+        .order("created_at", { ascending: false });
 
-    // Get bookmarks count
-    const { count: bookmarksCount } = await supabase
-      .from('saved_feed_posts')
-      .select('*', { count: 'exact', head: true })
-      .eq('feed_posts.owner_id', userId);
+      setVerificationRequests(allRequests?.map((r: any) => ({
+        id: r.id,
+        itemId: r.item_id,
+        itemType: r.item_type,
+        brandName: r.brand_name,
+        status: r.status,
+        createdAt: r.created_at,
+        item: {
+          title: r.catalog_items.title,
+          image: r.catalog_items.image_url,
+          seller: r.catalog_items.seller,
+        },
+      })) || []);
 
-    setStats({
-      totalFollowers: followersCount || 0,
-      totalCatalogs: catalogsCount || 0,
-      totalPosts: postsCount || 0,
-      totalCatalogItems: catalogItemsCount || 0,
-      totalPostItems: postItemsCount || 0,
-      totalLikesReceived: totalCatalogItemLikes + totalPostItemLikes + totalPostLikes,
-      totalBookmarks: bookmarksCount || 0,
-    });
+      // Calculate totals
+      const totalLikes = catalogStats.reduce((sum, c) => sum + c.totalLikes, 0);
+      const totalBookmarks = catalogStats.reduce((sum, c) => sum + c.totalBookmarks, 0);
+      const totalClicks = catalogStats.reduce((sum, c) => sum + c.totalClicks, 0);
+      const totalUniqueClicks = catalogStats.reduce((sum, c) => sum + c.uniqueClicks, 0);
+      const totalItems = catalogStats.reduce((sum, c) => sum + c.totalItems, 0);
+      const verifiedItems = itemsWithStatus.filter(i => i.isVerified).length;
+      const monetizedItems = itemsWithStatus.filter(i => i.isMonetized).length;
+
+      setStats({
+        totalFollowers: followerCount || 0,
+        totalCatalogs: catalogsData?.length || 0,
+        totalItems,
+        totalLikes,
+        totalBookmarks,
+        totalClicks,
+        uniqueClicks: totalUniqueClicks,
+        clickThroughRate: totalClicks > 0 ? (totalUniqueClicks / totalClicks) * 100 : 0,
+        avgEngagement: totalItems > 0 ? (totalLikes / totalItems) * 100 : 0,
+        totalReach: totalUniqueClicks + totalBookmarks,
+        verifiedItems,
+        monetizedItems,
+      });
+    } catch (error) {
+      console.error("Error loading analytics:", error);
+    } finally {
+      setLoading(false);
+    }
+  }
+
+  async function requestItemVerification(itemId: string, brandName: string) {
+    if (!currentUserId) return;
+
+    try {
+      const { error } = await supabase
+        .from("item_verification_requests")
+        .insert({
+          user_id: currentUserId,
+          item_id: itemId,
+          item_type: "catalog",
+          brand_name: brandName,
+          status: "pending",
+        });
+
+      if (error) {
+        if (error.code === "23505") {
+          alert("Verification already requested for this item");
+        } else {
+          throw error;
+        }
+      } else {
+        alert("Verification request submitted!");
+        loadAnalytics();
+      }
+    } catch (error) {
+      console.error("Error:", error);
+      alert("Failed to submit request");
+    }
   }
 
   async function handleApplyForVerification() {
     setApplying(true);
-
     const { data: { user } } = await supabase.auth.getUser();
     if (!user) return;
 
     const { error } = await supabase
-      .from('verification_requests')
-      .insert({
-        user_id: user.id,
-        status: 'pending',
-      });
+      .from("verification_requests")
+      .insert({ user_id: user.id, status: "pending" });
 
     if (error) {
-      console.error('Error applying for verification:', error);
-      alert('Failed to submit application. Please try again.');
+      alert("Failed to submit");
     } else {
       setHasApplied(true);
-      alert('Application submitted! We will review your request soon.');
+      alert("Application submitted!");
     }
-
     setApplying(false);
   }
 
+  const fmt = (n: number) => {
+    if (n >= 1000000) return (n / 1000000).toFixed(1) + "M";
+    if (n >= 1000) return (n / 1000).toFixed(1) + "K";
+    return n.toString();
+  };
+
+  const getSortedItems = () => {
+    return [...items].sort((a, b) => {
+      if (sortBy === "clicks") return b.clicks - a.clicks;
+      if (sortBy === "likes") return b.likes - a.likes;
+      return (b.likes + b.clicks) - (a.likes + a.clicks);
+    });
+  };
+
   if (loading) {
     return (
-      <>
-        <Head>
-          <title>Creator Analytics | Sourced</title>
-        </Head>
-        <style jsx global>{`
-          @import url('https://fonts.googleapis.com/css2?family=Archivo+Black&family=Bebas+Neue&display=swap');
-        `}</style>
-        <div className="min-h-screen bg-white flex items-center justify-center">
-          <div className="flex flex-col items-center gap-4">
-            <div className="text-black text-2xl font-black tracking-widest animate-pulse" style={{ fontFamily: 'Bebas Neue' }}>
-              LOADING...
-            </div>
-          </div>
+      <div className="min-h-screen bg-[#0a0a0a] flex items-center justify-center">
+        <div className="relative">
+          <div className="w-16 h-16 border-4 border-white/10 border-t-white rounded-full animate-spin" />
         </div>
-      </>
+      </div>
     );
   }
 
-  // Not verified - show application screen
+  // VERIFICATION REQUEST SCREEN
   if (!isVerified) {
     return (
-      <>
-        <Head>
-          <title>Apply for Verification | Sourced</title>
-        </Head>
-        <style jsx global>{`
-          @import url('https://fonts.googleapis.com/css2?family=Archivo+Black&family=Bebas+Neue&display=swap');
-        `}</style>
+      <div className="min-h-screen bg-[#0a0a0a] text-white relative overflow-hidden">
+        <div className="absolute inset-0 opacity-30">
+          <div className="absolute top-0 -left-4 w-72 h-72 bg-purple-500 rounded-full mix-blend-multiply filter blur-xl animate-blob" />
+          <div className="absolute top-0 -right-4 w-72 h-72 bg-blue-500 rounded-full mix-blend-multiply filter blur-xl animate-blob animation-delay-2000" />
+          <div className="absolute -bottom-8 left-20 w-72 h-72 bg-pink-500 rounded-full mix-blend-multiply filter blur-xl animate-blob animation-delay-4000" />
+        </div>
 
-        <div className="min-h-screen bg-white">
-          <div className="max-w-4xl mx-auto px-6 py-20">
-            <div className="text-center space-y-8">
-              {/* Icon */}
-              <div className="flex justify-center">
-                <div className="w-24 h-24 rounded-full bg-black/5 flex items-center justify-center">
-                  <svg className="w-12 h-12 text-black/40" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2}>
-                    <path strokeLinecap="round" strokeLinejoin="round" d="M9 12l2 2 4-4m5.618-4.016A11.955 11.955 0 0112 2.944a11.955 11.955 0 01-8.618 3.04A12.02 12.02 0 003 9c0 5.591 3.824 10.29 9 11.622 5.176-1.332 9-6.03 9-11.622 0-1.042-.133-2.052-.382-3.016z" />
-                  </svg>
-                </div>
-              </div>
-
-              {/* Heading */}
-              <div className="space-y-3">
-                <h1 className="text-5xl md:text-6xl font-black tracking-tight" style={{ fontFamily: 'Archivo Black' }}>
-                  BECOME A VERIFIED CREATOR
-                </h1>
-                <p className="text-lg text-black/60 max-w-2xl mx-auto">
-                  Get access to advanced analytics, affiliate programs, and exclusive creator tools.
-                </p>
-              </div>
-
-              {/* Benefits */}
-              <div className="grid md:grid-cols-3 gap-6 max-w-3xl mx-auto pt-8">
-                <div className="p-6 border border-black/10 rounded-lg">
-                  <div className="text-3xl mb-3">📊</div>
-                  <h3 className="text-lg font-black mb-2" style={{ fontFamily: 'Bebas Neue' }}>ANALYTICS</h3>
-                  <p className="text-sm text-black/60">Track engagement, views, and performance metrics</p>
-                </div>
-                <div className="p-6 border border-black/10 rounded-lg">
-                  <div className="text-3xl mb-3">💰</div>
-                  <h3 className="text-lg font-black mb-2" style={{ fontFamily: 'Bebas Neue' }}>AFFILIATES</h3>
-                  <p className="text-sm text-black/60">Earn commissions on recommended products</p>
-                </div>
-                <div className="p-6 border border-black/10 rounded-lg">
-                  <div className="text-3xl mb-3">✓</div>
-                  <h3 className="text-lg font-black mb-2" style={{ fontFamily: 'Bebas Neue' }}>VERIFIED BADGE</h3>
-                  <p className="text-sm text-black/60">Stand out with the verified creator checkmark</p>
-                </div>
-              </div>
-
-              {/* CTA */}
-              <div className="pt-8">
-                {hasApplied ? (
-                  <div className="inline-block px-8 py-4 bg-black/5 rounded-lg">
-                    <p className="text-sm font-black tracking-wider" style={{ fontFamily: 'Bebas Neue' }}>
-                      APPLICATION PENDING REVIEW
-                    </p>
-                    <p className="text-xs text-black/60 mt-2">
-                      We'll notify you once your application is reviewed
-                    </p>
-                  </div>
-                ) : (
-                  <button
-                    onClick={handleApplyForVerification}
-                    disabled={applying}
-                    className="px-12 py-4 bg-black text-white hover:bg-black/80 transition-all font-black tracking-wider text-lg disabled:opacity-50"
-                    style={{ fontFamily: 'Bebas Neue' }}
-                  >
-                    {applying ? 'SUBMITTING...' : 'APPLY FOR VERIFICATION'}
-                  </button>
-                )}
-              </div>
+        <div className="relative z-10 max-w-4xl mx-auto px-6 py-20">
+          <div className="text-center mb-16">
+            <div className="inline-flex items-center gap-2 px-4 py-2 bg-white/5 backdrop-blur-sm border border-white/10 rounded-full mb-8">
+              <div className="w-2 h-2 bg-green-400 rounded-full animate-pulse" />
+              <span className="text-sm font-medium tracking-wider">CREATOR VERIFICATION</span>
             </div>
+
+            <h1 className="text-6xl md:text-7xl font-black mb-6 leading-none">
+              Unlock Your
+              <br />
+              <span className="bg-gradient-to-r from-blue-400 via-purple-400 to-pink-400 bg-clip-text text-transparent">
+                Analytics Dashboard
+              </span>
+            </h1>
+
+            <p className="text-xl text-white/60 max-w-2xl mx-auto leading-relaxed">
+              Get verified to access comprehensive analytics, item monetization, and powerful growth tools.
+            </p>
+          </div>
+
+          <div className="grid md:grid-cols-3 gap-6 mb-16">
+            {[
+              {
+                title: "Live Analytics",
+                desc: "Track clicks, engagement, and performance in real-time across all catalogs",
+                gradient: "from-blue-500/20 to-cyan-500/20",
+              },
+              {
+                title: "Item Verification",
+                desc: "Submit partner brand items for verification and monetization",
+                gradient: "from-purple-500/20 to-pink-500/20",
+              },
+              {
+                title: "Performance Insights",
+                desc: "Understand what drives engagement and optimize your content",
+                gradient: "from-orange-500/20 to-red-500/20",
+              },
+            ].map((feature, i) => (
+              <div
+                key={i}
+                className={`relative p-6 bg-gradient-to-br ${feature.gradient} backdrop-blur-sm border border-white/10 rounded-2xl hover:border-white/20 transition-all`}
+              >
+                <h3 className="text-lg font-bold mb-2">{feature.title}</h3>
+                <p className="text-sm text-white/60">{feature.desc}</p>
+              </div>
+            ))}
+          </div>
+
+          <div className="text-center">
+            {hasApplied ? (
+              <div className="inline-flex flex-col items-center gap-4 p-8 bg-yellow-500/10 backdrop-blur-sm border border-yellow-500/20 rounded-2xl">
+                <div className="flex items-center gap-3">
+                  <div className="w-3 h-3 bg-yellow-400 rounded-full animate-pulse" />
+                  <span className="text-xl font-bold">Application Under Review</span>
+                </div>
+                <p className="text-white/60">We'll notify you once verified</p>
+              </div>
+            ) : (
+              <button
+                onClick={handleApplyForVerification}
+                disabled={applying}
+                className="px-12 py-5 bg-gradient-to-r from-blue-500 to-purple-500 rounded-full font-bold text-lg hover:shadow-2xl hover:shadow-purple-500/50 transition-all hover:scale-105 disabled:opacity-50"
+              >
+                {applying ? "Submitting..." : "Apply for Verification"}
+              </button>
+            )}
           </div>
         </div>
-      </>
+
+        <style jsx>{`
+          @keyframes blob {
+            0%, 100% { transform: translate(0px, 0px) scale(1); }
+            33% { transform: translate(30px, -50px) scale(1.1); }
+            66% { transform: translate(-20px, 20px) scale(0.9); }
+          }
+          .animate-blob { animation: blob 7s infinite; }
+          .animation-delay-2000 { animation-delay: 2s; }
+          .animation-delay-4000 { animation-delay: 4s; }
+        `}</style>
+      </div>
     );
   }
 
-  // Verified - show full analytics
+  // MAIN DASHBOARD
   return (
-    <>
-      <Head>
-        <title>Creator Analytics | Sourced</title>
-      </Head>
-      <style jsx global>{`
-        @import url('https://fonts.googleapis.com/css2?family=Archivo+Black&family=Bebas+Neue&display=swap');
-      `}</style>
+    <div className="min-h-screen bg-[#0a0a0a] text-white">
+      {/* Header */}
+      <div className="border-b border-white/10 bg-black/50 backdrop-blur-xl sticky top-0 z-50">
+        <div className="max-w-7xl mx-auto px-6 py-4">
+          <div className="flex items-center justify-between">
+            <h1 className="text-2xl font-black">Creator Analytics</h1>
+            <button
+              onClick={() => router.push("/")}
+              className="px-4 py-2 bg-white/5 hover:bg-white/10 rounded-lg text-sm font-medium transition-all"
+            >
+              Back to Home
+            </button>
+          </div>
+        </div>
+      </div>
 
-      <div className="min-h-screen bg-white">
-        {/* Header */}
-        <div className="border-b border-black/10 bg-white sticky top-0 z-10">
-          <div className="max-w-7xl mx-auto px-6 py-6">
-            <div className="flex items-center justify-between">
-              <div>
-                <h1 className="text-4xl font-black tracking-tight" style={{ fontFamily: 'Archivo Black' }}>
-                  CREATOR ANALYTICS
-                </h1>
-                <p className="text-sm text-black/60 mt-1">
-                  @{currentUser?.username}
-                </p>
-              </div>
-              <div className="flex items-center gap-2">
-                <svg className="w-5 h-5 text-blue-500" fill="currentColor" viewBox="0 0 24 24">
-                  <path d="M9 12l2 2 4-4m6 2a9 9 0 11-18 0 9 9 0 0118 0z" />
-                </svg>
-                <span className="text-sm font-black" style={{ fontFamily: 'Bebas Neue' }}>VERIFIED</span>
-              </div>
+      {/* Tabs */}
+      <div className="border-b border-white/10 bg-black/30 backdrop-blur-sm sticky top-[73px] z-40">
+        <div className="max-w-7xl mx-auto px-6">
+          <div className="flex gap-1">
+            {[
+              { id: "overview", label: "Overview" },
+              { id: "catalogs", label: "Catalogs" },
+              { id: "items", label: "Items" },
+              { id: "monetization", label: "Monetization" },
+            ].map((tab) => (
+              <button
+                key={tab.id}
+                onClick={() => setActiveTab(tab.id as Tab)}
+                className={`px-6 py-4 font-semibold transition-all relative ${
+                  activeTab === tab.id
+                    ? "text-white"
+                    : "text-white/40 hover:text-white/60"
+                }`}
+              >
+                {tab.label}
+                {activeTab === tab.id && (
+                  <div className="absolute bottom-0 left-0 right-0 h-0.5 bg-gradient-to-r from-blue-500 to-purple-500" />
+                )}
+              </button>
+            ))}
+          </div>
+        </div>
+      </div>
+
+      <div className="max-w-7xl mx-auto px-6 py-8">
+        {/* OVERVIEW TAB */}
+        {activeTab === "overview" && (
+          <div className="space-y-8">
+            {/* Key metrics */}
+            <div className="grid grid-cols-2 md:grid-cols-4 gap-4">
+              {[
+                { label: "Followers", value: fmt(stats.totalFollowers), gradient: "from-blue-500 to-cyan-500" },
+                { label: "Total Clicks", value: fmt(stats.totalClicks), subValue: `${fmt(stats.uniqueClicks)} unique`, gradient: "from-purple-500 to-pink-500" },
+                { label: "Engagement", value: fmt(stats.totalLikes + stats.totalBookmarks), subValue: `${stats.avgEngagement.toFixed(1)}% avg`, gradient: "from-orange-500 to-red-500" },
+                { label: "Total Reach", value: fmt(stats.totalReach), subValue: `${stats.totalCatalogs} catalogs`, gradient: "from-green-500 to-emerald-500" },
+              ].map((metric, i) => (
+                <div key={i} className="p-6 bg-white/5 backdrop-blur-sm border border-white/10 rounded-2xl hover:border-white/20 transition-all group relative overflow-hidden">
+                  <div className={`absolute inset-0 bg-gradient-to-br ${metric.gradient} opacity-0 group-hover:opacity-10 transition-opacity`} />
+                  <div className="relative z-10">
+                    <div className="text-sm text-white/50 font-medium mb-3">{metric.label}</div>
+                    <div className="text-3xl font-black mb-1">{metric.value}</div>
+                    {metric.subValue && <div className="text-xs text-white/40">{metric.subValue}</div>}
+                  </div>
+                </div>
+              ))}
             </div>
 
-            {/* Tabs */}
-            <div className="flex gap-2 mt-6 overflow-x-auto">
-              {[
-                { id: 'overview', label: 'Overview' },
-                { id: 'catalogs', label: 'Catalogs' },
-                { id: 'posts', label: 'Posts' },
-                { id: 'items', label: 'Items' },
-                { id: 'affiliate', label: 'Affiliates' },
-              ].map((tab) => (
-                <button
-                  key={tab.id}
-                  onClick={() => setActiveTab(tab.id as any)}
-                  className={`px-6 py-2 font-black tracking-wider transition-all whitespace-nowrap ${
-                    activeTab === tab.id
-                      ? 'bg-black text-white'
-                      : 'bg-black/5 text-black hover:bg-black/10'
-                  }`}
-                  style={{ fontFamily: 'Bebas Neue' }}
+            {/* Quick stats */}
+            <div className="grid md:grid-cols-3 gap-6">
+              <div className="bg-gradient-to-br from-blue-500/20 to-purple-500/20 backdrop-blur-sm border border-white/10 rounded-2xl p-6">
+                <div className="text-sm text-white/50 mb-2">Click-Through Rate</div>
+                <div className="text-4xl font-black mb-1">{stats.clickThroughRate.toFixed(1)}%</div>
+                <div className="text-xs text-white/40">Unique / Total clicks</div>
+              </div>
+
+              <div className="bg-gradient-to-br from-green-500/20 to-emerald-500/20 backdrop-blur-sm border border-white/10 rounded-2xl p-6">
+                <div className="text-sm text-white/50 mb-2">Verified Items</div>
+                <div className="text-4xl font-black mb-1">{stats.verifiedItems}</div>
+                <div className="text-xs text-white/40">{stats.monetizedItems} monetized</div>
+              </div>
+
+              <div className="bg-gradient-to-br from-orange-500/20 to-red-500/20 backdrop-blur-sm border border-white/10 rounded-2xl p-6">
+                <div className="text-sm text-white/50 mb-2">Total Items</div>
+                <div className="text-4xl font-black mb-1">{fmt(stats.totalItems)}</div>
+                <div className="text-xs text-white/40">Across all catalogs</div>
+              </div>
+            </div>
+          </div>
+        )}
+
+        {/* CATALOGS TAB */}
+        {activeTab === "catalogs" && (
+          <div className="space-y-6">
+            <div className="flex items-center justify-between">
+              <h2 className="text-2xl font-bold">Your Catalogs</h2>
+              <div className="text-sm text-white/50">{catalogs.length} total</div>
+            </div>
+
+            <div className="grid md:grid-cols-3 gap-6">
+              {catalogs.map((catalog, i) => (
+                <div
+                  key={catalog.id}
+                  onClick={() => router.push(`/catalogs/${catalog.slug}`)}
+                  className="group bg-white/5 border border-white/10 rounded-2xl overflow-hidden hover:border-white/30 transition-all cursor-pointer"
                 >
-                  {tab.label}
-                </button>
+                  {i < 3 && (
+                    <div className="absolute top-3 left-3 z-10 w-8 h-8 bg-gradient-to-br from-yellow-400 to-orange-500 rounded-full flex items-center justify-center text-black font-bold text-sm">
+                      {i + 1}
+                    </div>
+                  )}
+                  <div className="aspect-square bg-white/5 overflow-hidden">
+                    {catalog.image && (
+                      <img src={catalog.image} alt={catalog.name} className="w-full h-full object-cover group-hover:scale-110 transition-transform duration-500" />
+                    )}
+                  </div>
+                  <div className="p-4">
+                    <h3 className="font-bold mb-3">{catalog.name}</h3>
+                    <div className="grid grid-cols-2 gap-2">
+                      <div className="bg-white/5 rounded-lg p-2">
+                        <div className="text-white/50 text-xs mb-1">Clicks</div>
+                        <div className="font-bold">{fmt(catalog.totalClicks)}</div>
+                      </div>
+                      <div className="bg-white/5 rounded-lg p-2">
+                        <div className="text-white/50 text-xs mb-1">Engagement</div>
+                        <div className="font-bold">{fmt(catalog.totalLikes + catalog.totalBookmarks)}</div>
+                      </div>
+                    </div>
+                  </div>
+                </div>
               ))}
             </div>
           </div>
-        </div>
+        )}
 
-        {/* Content */}
-        <div className="max-w-7xl mx-auto px-6 py-8">
-          {/* OVERVIEW TAB */}
-          {activeTab === 'overview' && (
-            <div className="space-y-8">
-              {/* Stats Grid */}
-              <div className="grid grid-cols-2 md:grid-cols-4 gap-4">
-                <div className="p-6 border border-black/10 rounded-lg">
-                  <div className="text-3xl font-black" style={{ fontFamily: 'Archivo Black' }}>
-                    {stats.totalFollowers}
-                  </div>
-                  <div className="text-xs tracking-wider text-black/60 mt-1" style={{ fontFamily: 'Bebas Neue' }}>
-                    FOLLOWERS
-                  </div>
-                </div>
-
-                <div className="p-6 border border-black/10 rounded-lg">
-                  <div className="text-3xl font-black" style={{ fontFamily: 'Archivo Black' }}>
-                    {stats.totalLikesReceived}
-                  </div>
-                  <div className="text-xs tracking-wider text-black/60 mt-1" style={{ fontFamily: 'Bebas Neue' }}>
-                    TOTAL LIKES
-                  </div>
-                </div>
-
-                <div className="p-6 border border-black/10 rounded-lg">
-                  <div className="text-3xl font-black" style={{ fontFamily: 'Archivo Black' }}>
-                    {stats.totalCatalogs}
-                  </div>
-                  <div className="text-xs tracking-wider text-black/60 mt-1" style={{ fontFamily: 'Bebas Neue' }}>
-                    CATALOGS
-                  </div>
-                </div>
-
-                <div className="p-6 border border-black/10 rounded-lg">
-                  <div className="text-3xl font-black" style={{ fontFamily: 'Archivo Black' }}>
-                    {stats.totalPosts}
-                  </div>
-                  <div className="text-xs tracking-wider text-black/60 mt-1" style={{ fontFamily: 'Bebas Neue' }}>
-                    POSTS
-                  </div>
-                </div>
-
-                <div className="p-6 border border-black/10 rounded-lg">
-                  <div className="text-3xl font-black" style={{ fontFamily: 'Archivo Black' }}>
-                    {stats.totalCatalogItems}
-                  </div>
-                  <div className="text-xs tracking-wider text-black/60 mt-1" style={{ fontFamily: 'Bebas Neue' }}>
-                    CATALOG ITEMS
-                  </div>
-                </div>
-
-                <div className="p-6 border border-black/10 rounded-lg">
-                  <div className="text-3xl font-black" style={{ fontFamily: 'Archivo Black' }}>
-                    {stats.totalPostItems}
-                  </div>
-                  <div className="text-xs tracking-wider text-black/60 mt-1" style={{ fontFamily: 'Bebas Neue' }}>
-                    POST ITEMS
-                  </div>
-                </div>
-
-                <div className="p-6 border border-black/10 rounded-lg">
-                  <div className="text-3xl font-black" style={{ fontFamily: 'Archivo Black' }}>
-                    {stats.totalBookmarks}
-                  </div>
-                  <div className="text-xs tracking-wider text-black/60 mt-1" style={{ fontFamily: 'Bebas Neue' }}>
-                    BOOKMARKS
-                  </div>
-                </div>
-
-                <div className="p-6 border border-black/10 rounded-lg">
-                  <div className="text-3xl font-black" style={{ fontFamily: 'Archivo Black' }}>
-                    {stats.totalCatalogItems + stats.totalPostItems}
-                  </div>
-                  <div className="text-xs tracking-wider text-black/60 mt-1" style={{ fontFamily: 'Bebas Neue' }}>
-                    TOTAL ITEMS
-                  </div>
-                </div>
-              </div>
-
-              {/* Quick Actions */}
-              <div className="border-t border-black/10 pt-8">
-                <h2 className="text-2xl font-black mb-4" style={{ fontFamily: 'Bebas Neue' }}>
-                  QUICK ACTIONS
-                </h2>
-                <div className="grid md:grid-cols-3 gap-4">
+        {/* ITEMS TAB */}
+        {activeTab === "items" && (
+          <div className="space-y-6">
+            <div className="flex items-center justify-between">
+              <h2 className="text-2xl font-bold">All Items</h2>
+              <div className="flex gap-2">
+                {["clicks", "likes", "engagement"].map((sort) => (
                   <button
-                    onClick={() => router.push('/create/catalog')}
-                    className="p-6 border border-black/20 hover:border-black hover:bg-black/5 transition-all text-left"
+                    key={sort}
+                    onClick={() => setSortBy(sort as any)}
+                    className={`px-4 py-2 rounded-lg text-sm font-medium transition-all ${
+                      sortBy === sort ? "bg-white text-black" : "bg-white/5 text-white/60 hover:bg-white/10"
+                    }`}
                   >
-                    <div className="text-2xl mb-2">📚</div>
-                    <div className="font-black text-lg" style={{ fontFamily: 'Bebas Neue' }}>
-                      CREATE CATALOG
-                    </div>
-                    <div className="text-xs text-black/60 mt-1">
-                      Start a new collection
-                    </div>
+                    {sort.charAt(0).toUpperCase() + sort.slice(1)}
                   </button>
-
-                  <button
-                    onClick={() => router.push('/create/post/setup')}
-                    className="p-6 border border-black/20 hover:border-black hover:bg-black/5 transition-all text-left"
-                  >
-                    <div className="text-2xl mb-2">📸</div>
-                    <div className="font-black text-lg" style={{ fontFamily: 'Bebas Neue' }}>
-                      CREATE POST
-                    </div>
-                    <div className="text-xs text-black/60 mt-1">
-                      Share your style
-                    </div>
-                  </button>
-
-                  <button
-                    onClick={() => router.push(`/${currentUser?.username}`)}
-                    className="p-6 border border-black/20 hover:border-black hover:bg-black/5 transition-all text-left"
-                  >
-                    <div className="text-2xl mb-2">👤</div>
-                    <div className="font-black text-lg" style={{ fontFamily: 'Bebas Neue' }}>
-                      VIEW PROFILE
-                    </div>
-                    <div className="text-xs text-black/60 mt-1">
-                      See your public page
-                    </div>
-                  </button>
-                </div>
+                ))}
               </div>
             </div>
-          )}
 
-          {/* CATALOGS TAB */}
-          {activeTab === 'catalogs' && (
-            <div className="space-y-6">
-              <div className="flex items-center justify-between">
-                <h2 className="text-2xl font-black" style={{ fontFamily: 'Bebas Neue' }}>
-                  YOUR CATALOGS ({catalogs.length})
-                </h2>
-                <button
-                  onClick={() => router.push('/create/catalog')}
-                  className="px-6 py-2 bg-black text-white hover:bg-black/80 transition-all font-black tracking-wider text-sm"
-                  style={{ fontFamily: 'Bebas Neue' }}
-                >
-                  + NEW CATALOG
-                </button>
-              </div>
-
-              {catalogs.length === 0 ? (
-                <div className="text-center py-20 border border-black/10 rounded-lg">
-                  <p className="text-black/40">No catalogs yet</p>
-                </div>
-              ) : (
-                <div className="grid md:grid-cols-2 lg:grid-cols-3 gap-6">
-                  {catalogs.map((catalog) => (
-                    <div
-                      key={catalog.id}
-                      onClick={() => router.push(`/${currentUser?.username}/${catalog.slug}`)}
-                      className="border border-black/20 hover:border-black cursor-pointer transition-all group"
-                    >
-                      <div className="aspect-square bg-black/5 overflow-hidden">
-                        {catalog.image_url && (
-                          <img
-                            src={catalog.image_url}
-                            alt={catalog.name}
-                            className="w-full h-full object-cover group-hover:scale-105 transition-transform"
-                          />
-                        )}
+            <div className="grid md:grid-cols-5 gap-4">
+              {getSortedItems().map((item, i) => (
+                <div key={item.id} className="group bg-white/5 border border-white/10 rounded-xl overflow-hidden hover:border-white/30 transition-all">
+                  {i < 3 && (
+                    <div className="absolute top-2 left-2 z-10 w-6 h-6 bg-black/80 backdrop-blur-sm rounded-full flex items-center justify-center text-white font-bold text-xs">
+                      {i + 1}
+                    </div>
+                  )}
+                  {item.isVerified && (
+                    <div className="absolute top-2 right-2 z-10 w-6 h-6 bg-blue-500 rounded-full flex items-center justify-center">
+                      <svg className="w-3.5 h-3.5" fill="white" viewBox="0 0 20 20">
+                        <path d="M16.707 5.293a1 1 0 010 1.414l-8 8a1 1 0 01-1.414 0l-4-4a1 1 0 011.414-1.414L8 12.586l7.293-7.293a1 1 0 011.414 0z"/>
+                      </svg>
+                    </div>
+                  )}
+                  <div className="aspect-square bg-white/5 overflow-hidden">
+                    <img src={item.image} alt={item.title} className="w-full h-full object-cover group-hover:scale-110 transition-transform duration-500" />
+                  </div>
+                  <div className="p-3">
+                    <div className="text-xs font-bold mb-2 truncate">{item.title}</div>
+                    <div className="flex items-center justify-between text-xs mb-2">
+                      <span className="text-white/50">Clicks</span>
+                      <span className="font-bold">{fmt(item.clicks)}</span>
+                    </div>
+                    {item.canVerify && !item.isVerified && !item.verificationStatus && (
+                      <button
+                        onClick={() => requestItemVerification(item.id, item.seller || item.brand || "")}
+                        className="w-full py-1.5 bg-blue-500 hover:bg-blue-600 rounded-lg text-xs font-medium transition-all"
+                      >
+                        Request Verification
+                      </button>
+                    )}
+                    {item.verificationStatus === "pending" && (
+                      <div className="w-full py-1.5 bg-yellow-500/20 rounded-lg text-xs font-medium text-center text-yellow-400">
+                        Pending Review
                       </div>
-                      <div className="p-4">
-                        <h3 className="font-black text-lg tracking-wide" style={{ fontFamily: 'Bebas Neue' }}>
-                          {catalog.name}
-                        </h3>
-                        <div className="flex items-center gap-4 mt-2 text-xs text-black/60">
-                          <span>{catalog.item_count} items</span>
-                          <span>{catalog.visibility}</span>
-                        </div>
+                    )}
+                  </div>
+                </div>
+              ))}
+            </div>
+          </div>
+        )}
+
+        {/* MONETIZATION TAB */}
+        {activeTab === "monetization" && (
+          <div className="space-y-8">
+            <div>
+              <h2 className="text-2xl font-bold mb-2">Monetization</h2>
+              <p className="text-white/60">Submit partner brand items for verification and earn through affiliate links</p>
+            </div>
+
+            {/* Stats */}
+            <div className="grid md:grid-cols-3 gap-6">
+              <div className="bg-green-500/10 border border-green-500/20 rounded-2xl p-6">
+                <div className="text-sm text-green-400 mb-2">Verified Items</div>
+                <div className="text-4xl font-black">{stats.verifiedItems}</div>
+              </div>
+              <div className="bg-blue-500/10 border border-blue-500/20 rounded-2xl p-6">
+                <div className="text-sm text-blue-400 mb-2">Monetized Items</div>
+                <div className="text-4xl font-black">{stats.monetizedItems}</div>
+              </div>
+              <div className="bg-yellow-500/10 border border-yellow-500/20 rounded-2xl p-6">
+                <div className="text-sm text-yellow-400 mb-2">Pending Requests</div>
+                <div className="text-4xl font-black">{verificationRequests.filter(r => r.status === "pending").length}</div>
+              </div>
+            </div>
+
+            {/* Requests */}
+            <div>
+              <h3 className="text-xl font-bold mb-4">Verification Requests</h3>
+              {verificationRequests.length === 0 ? (
+                <div className="text-center py-12 text-white/40">No verification requests yet</div>
+              ) : (
+                <div className="space-y-3">
+                  {verificationRequests.map((request) => (
+                    <div key={request.id} className="flex items-center gap-4 p-4 bg-white/5 border border-white/10 rounded-xl">
+                      <div className="w-16 h-16 bg-white/5 rounded-lg overflow-hidden flex-shrink-0">
+                        <img src={request.item.image} alt={request.item.title} className="w-full h-full object-cover" />
+                      </div>
+                      <div className="flex-1 min-w-0">
+                        <h4 className="font-semibold truncate">{request.item.title}</h4>
+                        <p className="text-sm text-white/50">{request.brandName}</p>
+                      </div>
+                      <div className={`px-3 py-1 rounded-full text-xs font-medium ${
+                        request.status === "pending" ? "bg-yellow-500/20 text-yellow-400" :
+                        request.status === "approved" ? "bg-green-500/20 text-green-400" :
+                        "bg-red-500/20 text-red-400"
+                      }`}>
+                        {request.status.toUpperCase()}
                       </div>
                     </div>
                   ))}
                 </div>
               )}
             </div>
-          )}
-
-          {/* POSTS TAB */}
-          {activeTab === 'posts' && (
-            <div className="space-y-6">
-              <div className="flex items-center justify-between">
-                <h2 className="text-2xl font-black" style={{ fontFamily: 'Bebas Neue' }}>
-                  YOUR POSTS ({posts.length})
-                </h2>
-                <button
-                  onClick={() => router.push('/create/post/setup')}
-                  className="px-6 py-2 bg-black text-white hover:bg-black/80 transition-all font-black tracking-wider text-sm"
-                  style={{ fontFamily: 'Bebas Neue' }}
-                >
-                  + NEW POST
-                </button>
-              </div>
-
-              {posts.length === 0 ? (
-                <div className="text-center py-20 border border-black/10 rounded-lg">
-                  <p className="text-black/40">No posts yet</p>
-                </div>
-              ) : (
-                <div className="grid md:grid-cols-3 lg:grid-cols-4 gap-4">
-                  {posts.map((post) => (
-                    <div
-                      key={post.id}
-                      className="border border-black/20 hover:border-black cursor-pointer transition-all group"
-                    >
-                      <div className="aspect-square bg-black/5 overflow-hidden">
-                        <img
-                          src={post.image_url}
-                          alt=""
-                          className="w-full h-full object-cover group-hover:scale-105 transition-transform"
-                        />
-                      </div>
-                      <div className="p-3">
-                        <div className="flex items-center gap-3 text-xs text-black/60">
-                          <span className="flex items-center gap-1">
-                            <svg className="w-4 h-4" fill="currentColor" viewBox="0 0 24 24">
-                              <path d="M12 21.35l-1.45-1.32C5.4 15.36 2 12.28 2 8.5 2 5.42 4.42 3 7.5 3c1.74 0 3.41.81 4.5 2.09C13.09 3.81 14.76 3 16.5 3 19.58 3 22 5.42 22 8.5c0 3.78-3.4 6.86-8.55 11.54L12 21.35z"/>
-                            </svg>
-                            {post.like_count}
-                          </span>
-                          <span className="flex items-center gap-1">
-                            <svg className="w-4 h-4" fill="none" viewBox="0 0 24 24" stroke="currentColor">
-                              <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M8 12h.01M12 12h.01M16 12h.01M21 12c0 4.418-4.03 8-9 8a9.863 9.863 0 01-4.255-.949L3 20l1.395-3.72C3.512 15.042 3 13.574 3 12c0-4.418 4.03-8 9-8s9 3.582 9 8z" />
-                            </svg>
-                            {post.comment_count}
-                          </span>
-                        </div>
-                      </div>
-                    </div>
-                  ))}
-                </div>
-              )}
-            </div>
-          )}
-
-          {/* ITEMS TAB */}
-          {activeTab === 'items' && (
-            <div className="space-y-8">
-              {/* Catalog Items */}
-              <div>
-                <h2 className="text-2xl font-black mb-4" style={{ fontFamily: 'Bebas Neue' }}>
-                  CATALOG ITEMS ({catalogItems.length})
-                </h2>
-                {catalogItems.length === 0 ? (
-                  <div className="text-center py-10 border border-black/10 rounded-lg">
-                    <p className="text-black/40">No catalog items yet</p>
-                  </div>
-                ) : (
-                  <div className="grid md:grid-cols-4 lg:grid-cols-5 gap-4">
-                    {catalogItems.map((item) => (
-                      <div
-                        key={item.id}
-                        className="border border-black/20 hover:border-black transition-all group"
-                      >
-                        <div className="aspect-square bg-black/5 overflow-hidden relative">
-                          <img
-                            src={item.image_url}
-                            alt={item.title}
-                            className="w-full h-full object-cover group-hover:scale-105 transition-transform"
-                          />
-                          <div className="absolute top-2 left-2">
-                            <span className="px-2 py-1 bg-blue-500 text-white text-[9px] font-black" style={{ fontFamily: 'Bebas Neue' }}>
-                              CATALOG
-                            </span>
-                          </div>
-                        </div>
-                        <div className="p-3">
-                          <p className="text-xs font-black truncate" style={{ fontFamily: 'Bebas Neue' }}>
-                            {item.title}
-                          </p>
-                          <p className="text-[10px] text-black/40 truncate mt-1">
-                            {item.catalog_name}
-                          </p>
-                          <div className="flex items-center justify-between mt-2">
-                            {item.price && (
-                              <span className="text-xs font-black">${item.price}</span>
-                            )}
-                            <span className="text-[10px] text-black/60">
-                              ♥ {item.like_count}
-                            </span>
-                          </div>
-                        </div>
-                      </div>
-                    ))}
-                  </div>
-                )}
-              </div>
-
-              {/* Post Items */}
-              <div className="border-t border-black/10 pt-8">
-                <h2 className="text-2xl font-black mb-4" style={{ fontFamily: 'Bebas Neue' }}>
-                  POST ITEMS ({postItems.length})
-                </h2>
-                {postItems.length === 0 ? (
-                  <div className="text-center py-10 border border-black/10 rounded-lg">
-                    <p className="text-black/40">No post items yet</p>
-                  </div>
-                ) : (
-                  <div className="grid md:grid-cols-4 lg:grid-cols-5 gap-4">
-                    {postItems.map((item) => (
-                      <div
-                        key={item.id}
-                        className="border border-black/20 hover:border-black transition-all group"
-                      >
-                        <div className="aspect-square bg-black/5 overflow-hidden relative">
-                          <img
-                            src={item.image_url}
-                            alt={item.title}
-                            className="w-full h-full object-cover group-hover:scale-105 transition-transform"
-                          />
-                          <div className="absolute top-2 left-2">
-                            <span className="px-2 py-1 bg-green-500 text-white text-[9px] font-black" style={{ fontFamily: 'Bebas Neue' }}>
-                              POST
-                            </span>
-                          </div>
-                        </div>
-                        <div className="p-3">
-                          <p className="text-xs font-black truncate" style={{ fontFamily: 'Bebas Neue' }}>
-                            {item.title}
-                          </p>
-                          <div className="flex items-center justify-between mt-2">
-                            {item.price && (
-                              <span className="text-xs font-black">${item.price}</span>
-                            )}
-                            <span className="text-[10px] text-black/60">
-                              ♥ {item.like_count}
-                            </span>
-                          </div>
-                        </div>
-                      </div>
-                    ))}
-                  </div>
-                )}
-              </div>
-            </div>
-          )}
-
-          {/* AFFILIATE TAB */}
-          {activeTab === 'affiliate' && (
-            <div className="space-y-6">
-              <div className="text-center py-20 border-2 border-dashed border-black/20 rounded-lg">
-                <div className="text-6xl mb-4">🚀</div>
-                <h2 className="text-3xl font-black mb-3" style={{ fontFamily: 'Archivo Black' }}>
-                  COMING SOON
-                </h2>
-                <p className="text-black/60 mb-6 max-w-md mx-auto">
-                  Submit your top-performing items for affiliate consideration. Earn commissions when your recommendations drive sales.
-                </p>
-                <div className="space-y-4 max-w-xl mx-auto">
-                  <div className="p-4 bg-black/5 rounded-lg text-left">
-                    <h3 className="font-black text-sm mb-2" style={{ fontFamily: 'Bebas Neue' }}>
-                      HOW IT WORKS
-                    </h3>
-                    <ol className="text-sm text-black/70 space-y-2">
-                      <li>1. Submit items from your catalogs or posts</li>
-                      <li>2. We review and approve eligible products</li>
-                      <li>3. Items get unique affiliate tracking links</li>
-                      <li>4. Earn commission on every sale you drive</li>
-                    </ol>
-                  </div>
-                  <button
-                    disabled
-                    className="px-8 py-3 bg-black/20 text-black/40 font-black tracking-wider cursor-not-allowed"
-                    style={{ fontFamily: 'Bebas Neue' }}
-                  >
-                    SUBMIT ITEMS (COMING SOON)
-                  </button>
-                </div>
-              </div>
-            </div>
-          )}
-        </div>
+          </div>
+        )}
       </div>
-    </>
+    </div>
   );
 }
