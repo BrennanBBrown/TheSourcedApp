@@ -8,7 +8,7 @@ export const dynamic = "force-dynamic";
 
 // ─── Types ────────────────────────────────────────────────────────────────────
 
-type DiscoverMode = "trending" | "new" | "following";
+type DiscoverMode = "trending" | "new" | "following" | "creators";
 
 type GridItem = {
   id: string;
@@ -161,7 +161,7 @@ function ItemCard({
         {item.is_monetized && (
           <div
             className="absolute top-2 right-2 w-5 h-5 bg-black/25 backdrop-blur-sm flex items-center justify-center"
-            title="Affiliate — creator earns commission"
+            title="This item earns the creator a commission"
           >
             <span className="text-[9px] font-black text-white" style={{ fontFamily: "Bebas Neue, sans-serif" }}>$</span>
           </div>
@@ -306,13 +306,10 @@ function ItemModal({
   onRequireLogin: () => void;
 }) {
   useEffect(() => {
-    document.body.style.overflow = "hidden";
+    // Don't touch document.body.overflow — page uses its own scroll container
     const h = (e: KeyboardEvent) => { if (e.key === "Escape") onClose(); };
     window.addEventListener("keydown", h);
-    return () => {
-      document.body.style.overflow = "";
-      window.removeEventListener("keydown", h);
-    };
+    return () => window.removeEventListener("keydown", h);
   }, [onClose]);
 
   function handleLike() {
@@ -321,80 +318,121 @@ function ItemModal({
   }
 
   return (
+    // Backdrop — fixed so it truly covers viewport and can't be scrolled behind
     <div
-      className="fixed inset-0 z-50 flex items-end md:items-center justify-center bg-black/85 backdrop-blur-sm"
+      className="fixed inset-0 z-[500] flex items-end md:items-center justify-center"
+      style={{ backgroundColor: "rgba(0,0,0,0.75)" }}
       onClick={onClose}
     >
+      {/* Sheet — compact bottom sheet on mobile, centered card on desktop */}
       <div
-        className="relative w-full md:max-w-2xl bg-white"
+        className="relative w-full md:w-auto md:min-w-[400px] md:max-w-lg bg-white shadow-2xl"
+        data-sheet="true"
+        style={{ maxHeight: "65vh", borderRadius: "14px 14px 0 0" }}
         onClick={(e) => e.stopPropagation()}
       >
+        {/* Drag handle — tappable, closes on tap or swipe down */}
+        <div
+          className="flex justify-center items-center pt-2.5 pb-2 md:hidden cursor-pointer select-none"
+          onClick={onClose}
+          onTouchStart={(e) => {
+            const startY = e.touches[0].clientY;
+            const el = e.currentTarget.closest("[data-sheet]") as HTMLElement;
+            function onMove(ev: TouchEvent) {
+              if (ev.touches[0].clientY - startY > 40) { onClose(); cleanup(); }
+            }
+            function cleanup() {
+              window.removeEventListener("touchmove", onMove);
+              window.removeEventListener("touchend", cleanup);
+            }
+            window.addEventListener("touchmove", onMove);
+            window.addEventListener("touchend", cleanup);
+          }}
+        >
+          <div className="w-10 h-1.5 bg-black/20 rounded-full hover:bg-black/40 transition-colors" />
+        </div>
+
+        {/* Close button — always visible, top right */}
         <button
           onClick={onClose}
-          className="absolute top-3 right-3 z-10 w-7 h-7 flex items-center justify-center bg-black/5 hover:bg-black/10 transition-colors text-xs font-black"
+          className="absolute top-2.5 right-3 z-10 w-7 h-7 flex items-center justify-center bg-black/8 hover:bg-black/15 transition-colors text-xs font-black rounded-full"
           style={{ fontFamily: "Bebas Neue, sans-serif" }}
         >
           ✕
         </button>
-        <div className="flex flex-col md:flex-row">
-          {/* Image */}
-          <div className="w-full md:w-64 aspect-square flex-shrink-0 bg-black/5">
-            <img src={item.image_url} alt={item.title} className="w-full h-full object-contain" />
+
+        {/* Content — side by side: small image left, info right */}
+        <div className="flex gap-0 overflow-hidden" style={{ maxHeight: "calc(65vh - 28px)" }}>
+          {/* Image — small fixed square, never dominates */}
+          <div className="w-24 h-24 md:w-40 md:h-40 flex-shrink-0 bg-black/5 self-start m-3 mr-0">
+            <img
+              src={item.image_url}
+              alt={item.title}
+              className="w-full h-full object-cover"
+            />
           </div>
-          {/* Info */}
-          <div className="flex-1 p-5 flex flex-col justify-between min-h-0">
-            <div className="space-y-2 mb-4">
-              <div>
-                <h2 className="text-lg md:text-2xl font-black tracking-tighter leading-tight" style={{ fontFamily: "Archivo Black, sans-serif" }}>
-                  {item.title}
-                </h2>
-                {item.is_monetized && (
-                  <p className="text-[8px] tracking-[0.3em] opacity-30 mt-0.5" style={{ fontFamily: "Bebas Neue, sans-serif" }}>
-                    $ AFFILIATED — CREATOR EARNS COMMISSION
-                  </p>
-                )}
-              </div>
-              {item.brand && <p className="text-[10px] tracking-wider opacity-50 uppercase">Brand: {item.brand}</p>}
-              {item.seller && <p className="text-[10px] tracking-wider opacity-50 uppercase">Seller: {item.seller}</p>}
-              {item.price && (
-                <p className="text-xl font-black" style={{ fontFamily: "Bebas Neue, sans-serif" }}>${item.price}</p>
-              )}
-              {item.style_tags && item.style_tags.length > 0 && (
-                <div className="flex flex-wrap gap-1">
-                  {item.style_tags.slice(0, 5).map((tag, i) => (
-                    <span key={i} className="px-1.5 py-0.5 bg-black/5 text-[8px] tracking-wider border border-black/10" style={{ fontFamily: "Bebas Neue, sans-serif" }}>
-                      {tag}
-                    </span>
-                  ))}
-                </div>
+
+          {/* Info — scrollable interior so nothing ever gets cut off */}
+          <div className="flex-1 p-3 overflow-y-auto flex flex-col gap-2" style={{ WebkitOverflowScrolling: "touch" }}>
+            <div>
+              <h2 className="text-sm md:text-lg font-black tracking-tighter leading-tight pr-6" style={{ fontFamily: "Archivo Black, sans-serif" }}>
+                {item.title}
+              </h2>
+              {item.is_monetized && (
+                <p className="text-[9px] tracking-[0.2em] font-black mt-1" style={{ fontFamily: "Bebas Neue, sans-serif", color: '#000000' }}>
+                  $ CREATOR EARNS A COMMISSION ON THIS ITEM
+                </p>
               )}
             </div>
-            <div className="space-y-2">
+
+            <div className="space-y-0.5">
+              {item.brand && <p className="text-[9px] tracking-wider opacity-40 uppercase">Brand: {item.brand}</p>}
+              {item.seller && <p className="text-[9px] tracking-wider opacity-40 uppercase">Seller: {item.seller}</p>}
+            </div>
+
+            {item.price && (
+              <p className="text-base font-black" style={{ fontFamily: "Bebas Neue, sans-serif" }}>${item.price}</p>
+            )}
+
+            {item.style_tags && item.style_tags.length > 0 && (
+              <div className="flex flex-wrap gap-1">
+                {item.style_tags.slice(0, 4).map((tag, i) => (
+                  <span key={i} className="px-1.5 py-0.5 bg-black/5 text-[7px] tracking-wider border border-black/10" style={{ fontFamily: "Bebas Neue, sans-serif" }}>
+                    {tag}
+                  </span>
+                ))}
+              </div>
+            )}
+
+            {/* Actions */}
+            <div className="flex flex-col gap-1.5 pt-1 pb-2">
               <button
                 onClick={handleLike}
-                className={`w-full py-2.5 border-2 text-[10px] tracking-[0.3em] font-black transition-all ${
-                  item.is_liked ? "bg-black text-white border-black" : "border-black hover:bg-black hover:text-white"
+                className={`w-full py-2 border text-[9px] tracking-[0.25em] font-black transition-all ${
+                  item.is_liked ? "bg-black text-white border-black" : "border-black/30 hover:border-black hover:bg-black/5"
                 }`}
                 style={{ fontFamily: "Bebas Neue, sans-serif" }}
               >
-                {item.is_liked ? "♥ LIKED" : "♡ LIKE"} ({item.like_count})
+                {item.is_liked ? `♥ LIKED (${item.like_count})` : `♡ LIKE (${item.like_count})`}
               </button>
+
               {item.product_url && (
                 <button
                   onClick={() => {
                     try { fetch("/api/track-click", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ itemId: item.id, itemType: "catalog", userId: currentUserId }) }); } catch {}
                     window.open(item.product_url!, "_blank");
                   }}
-                  className="w-full py-2.5 bg-black text-white hover:bg-white hover:text-black border-2 border-black transition-all text-[10px] tracking-[0.3em] font-black"
+                  className="w-full py-2 bg-black text-white hover:bg-white hover:text-black border border-black transition-all text-[9px] tracking-[0.25em] font-black"
                   style={{ fontFamily: "Bebas Neue, sans-serif" }}
                 >
                   VIEW PRODUCT ↗
                 </button>
               )}
+
               {item.catalog_slug && item.owner_username && (
                 <button
                   onClick={() => { onClose(); onNavigate(`/${item.owner_username}/${item.catalog_slug}`); }}
-                  className="w-full py-2 border border-black/20 hover:border-black hover:bg-black/5 transition-all text-[9px] tracking-[0.3em] font-black"
+                  className="w-full py-1.5 border border-black/15 hover:border-black/40 transition-all text-[8px] tracking-[0.2em] font-black opacity-60 hover:opacity-100"
                   style={{ fontFamily: "Bebas Neue, sans-serif" }}
                 >
                   IN: {item.catalog_name}
@@ -444,14 +482,21 @@ function SearchOverlay({
     setSearching(true);
     try {
       // Fire all queries in parallel — completely independent, no joins that can conflict
-      const [itemsRes, catalogsRes, profilesByUser, profilesByName] = await Promise.all([
+      const [itemsRes, feedItemsRes, catalogsRes, profilesByUser, profilesByName] = await Promise.all([
 
-        // ── Items: simple text search on own columns, then soft-join catalog data ──
+        // ── Catalog items ──────────────────────────────────────────────────────
         supabase
           .from("catalog_items")
           .select("id,title,image_url,product_url,price,seller,like_count,is_monetized,brand,style_tags,created_at,catalog_id")
           .or(`title.ilike.%${query}%,brand.ilike.%${query}%,seller.ilike.%${query}%,category.ilike.%${query}%`)
-          .limit(24),
+          .limit(20),
+
+        // ── Feed post items ────────────────────────────────────────────────────
+        supabase
+          .from("feed_post_items")
+          .select("id,title,image_url,product_url,price,seller,like_count,created_at,feed_post_id")
+          .or(`title.ilike.%${query}%,brand.ilike.%${query}%,seller.ilike.%${query}%`)
+          .limit(6),
 
         // ── Catalogs ──────────────────────────────────────────────────────────
         supabase
@@ -467,7 +512,7 @@ function SearchOverlay({
           .select("*")
           .limit(50),
 
-        // placeholder so Promise.all indices stay aligned
+        // placeholder (unused second profiles slot kept for index alignment)
         Promise.resolve({ data: [], error: null }),
       ]);
 
@@ -490,7 +535,7 @@ function SearchOverlay({
         });
       }
 
-      const items: GridItem[] = (itemsRes.data || []).map((item: any) => {
+      const catalogItemsMapped: GridItem[] = (itemsRes.data || []).map((item: any) => {
         const cat = catalogMap[item.catalog_id] ?? {};
         return {
           id: item.id,
@@ -512,6 +557,24 @@ function SearchOverlay({
           type: "catalog_item",
         };
       });
+
+      // Feed post items — typed as feed_post so handleItemClick routes to /post/:id
+      const feedItemsMapped: GridItem[] = (feedItemsRes.data || []).map((item: any) => ({
+        id: item.id,
+        title: item.title,
+        image_url: item.image_url,
+        product_url: item.product_url,
+        price: item.price,
+        seller: item.seller,
+        like_count: num(item.like_count),
+        is_liked: false,
+        is_monetized: false,
+        created_at: item.created_at,
+        feed_post_id: item.feed_post_id,
+        type: "feed_post" as const,
+      }));
+
+      const items: GridItem[] = [...catalogItemsMapped, ...feedItemsMapped];
 
       // Enrich catalog search results with owner usernames
       const catSearchOwnerIds = [...new Set((catalogsRes.data || []).map((c: any) => c.owner_id).filter(Boolean))];
@@ -569,20 +632,20 @@ function SearchOverlay({
   }
 
   function handleItemClick(item: GridItem) {
-    if (item.type === "feed_post" && item.feed_post_id) {
-      onNavigate(`/feed/${item.feed_post_id}`); onClose();
-    } else {
-      setExpandedItem(item);
+    if (item.type === "feed_post") {
+      if (item.feed_post_id) { onNavigate(`/post/${item.feed_post_id}`); onClose(); }
+      return;
     }
+    setExpandedItem(item);
   }
 
   const hasResults = results.items.length > 0 || results.catalogs.length > 0 || results.profiles.length > 0;
 
   return (
-    <div className="fixed inset-0 z-50 bg-white flex flex-col">
+    <div className="fixed inset-0 z-[200] bg-white flex flex-col">
       {/* Search input */}
-      <div className="border-b-2 border-black flex items-center px-5 md:px-10 gap-3 h-16 flex-shrink-0">
-        <span className="text-xl opacity-30 select-none flex-shrink-0">⌕</span>
+      <div className="border-b-2 border-black flex items-center px-5 md:px-10 gap-3 h-20 flex-shrink-0">
+        <span className="text-2xl opacity-30 select-none flex-shrink-0">⌕</span>
         <input
           ref={inputRef}
           type="text"
@@ -590,18 +653,18 @@ function SearchOverlay({
           onChange={(e) => setQ(e.target.value)}
           placeholder="SEARCH"
           className="flex-1 bg-transparent tracking-wider placeholder-black/25 focus:outline-none"
-          style={{ fontFamily: "Bebas Neue, sans-serif", fontSize: "16px" }}
+          style={{ fontFamily: "Bebas Neue, sans-serif", fontSize: "22px" }}
         />
         {searching && (
-          <span className="text-[9px] tracking-[0.4em] opacity-30 animate-pulse flex-shrink-0" style={{ fontFamily: "Bebas Neue, sans-serif" }}>SEARCHING</span>
+          <span className="text-[10px] tracking-[0.4em] opacity-30 animate-pulse flex-shrink-0" style={{ fontFamily: "Bebas Neue, sans-serif" }}>SEARCHING</span>
         )}
-        <button onClick={onClose} className="text-[10px] tracking-[0.3em] opacity-40 hover:opacity-100 transition-opacity font-black flex-shrink-0" style={{ fontFamily: "Bebas Neue, sans-serif" }}>
+        <button onClick={onClose} className="text-xs tracking-[0.3em] opacity-40 hover:opacity-100 transition-opacity font-black flex-shrink-0" style={{ fontFamily: "Bebas Neue, sans-serif" }}>
           [ESC]
         </button>
       </div>
 
       {/* Results */}
-      <div className="flex-1 overflow-y-auto overscroll-contain">
+      <div className="flex-1 overflow-y-auto overscroll-contain" style={{ WebkitOverflowScrolling: "touch" }}>
         {!q.trim() ? (
           <div className="flex items-center justify-center h-full opacity-15">
             <p className="text-4xl tracking-[0.2em]" style={{ fontFamily: "Bebas Neue, sans-serif" }}>TYPE TO SEARCH</p>
@@ -611,7 +674,7 @@ function SearchOverlay({
             <p className="text-3xl tracking-[0.2em]" style={{ fontFamily: "Bebas Neue, sans-serif" }}>NO RESULTS</p>
           </div>
         ) : (
-          <div className="px-5 md:px-10 py-6 space-y-8 max-w-5xl mx-auto">
+          <div className="px-5 md:px-10 py-6 pb-32 space-y-8 max-w-5xl mx-auto min-h-full">
 
             {/* Profiles */}
             {results.profiles.length > 0 && (
@@ -702,6 +765,110 @@ function SearchOverlay({
   );
 }
 
+
+// ─── CreatorCard ──────────────────────────────────────────────────────────────
+
+type CreatorProfile = {
+  id: string;
+  username: string;
+  full_name: string | null;
+  avatar_url: string | null;
+  follower_count: number;
+  catalog_count: number;
+  post_count: number;
+  is_following: boolean;
+  is_verified: boolean;
+};
+
+function CreatorCard({
+  creator,
+  currentUserId,
+  isOnboarded,
+  onFollow,
+  onNavigate,
+}: {
+  creator: CreatorProfile;
+  currentUserId: string | null;
+  isOnboarded: boolean;
+  onFollow: (id: string, following: boolean) => void;
+  onNavigate: (username: string) => void;
+}) {
+  return (
+    <div
+      className="group border border-black/10 hover:border-black transition-all duration-150 cursor-pointer bg-white overflow-hidden"
+      onClick={() => onNavigate(creator.username)}
+    >
+      {/* Avatar square — full bleed */}
+      <div className="aspect-square bg-black/5 overflow-hidden relative">
+        {creator.avatar_url ? (
+          <img
+            src={creator.avatar_url}
+            alt={creator.username}
+            className="w-full h-full object-cover group-hover:scale-[1.03] transition-transform duration-300"
+          />
+        ) : (
+          <div className="w-full h-full flex items-center justify-center bg-black/5">
+            <span className="text-5xl opacity-10">👤</span>
+          </div>
+        )}
+        {/* Verified badge */}
+        {creator.is_verified && (
+          <div className="absolute top-2 right-2 w-5 h-5 bg-black flex items-center justify-center">
+            <span className="text-white text-[9px]">✓</span>
+          </div>
+        )}
+      </div>
+
+      {/* Info */}
+      <div className="p-3">
+        <div className="flex items-start justify-between gap-2 mb-2">
+          <div className="min-w-0">
+            <p className="text-sm font-black tracking-tighter leading-tight truncate" style={{ fontFamily: "Archivo Black, sans-serif" }}>
+              @{creator.username}
+            </p>
+            {creator.full_name && (
+              <p className="text-[9px] opacity-40 truncate mt-0.5">{creator.full_name}</p>
+            )}
+          </div>
+          {currentUserId && currentUserId !== creator.id && (
+            <button
+              onClick={(e) => {
+                e.stopPropagation();
+                if (!isOnboarded) return;
+                onFollow(creator.id, creator.is_following);
+              }}
+              className={`flex-shrink-0 px-2.5 py-1 text-[8px] tracking-wider font-black border transition-all ${
+                creator.is_following
+                  ? "bg-black text-white border-black"
+                  : "border-black/30 hover:border-black hover:bg-black/5"
+              }`}
+              style={{ fontFamily: "Bebas Neue, sans-serif" }}
+            >
+              {creator.is_following ? "FOLLOWING" : "FOLLOW"}
+            </button>
+          )}
+        </div>
+
+        {/* Stats row */}
+        <div className="flex items-center gap-0 border-t border-black/8 pt-2 mt-2">
+          <div className="flex-1 text-center border-r border-black/8">
+            <p className="text-xs font-black leading-none" style={{ fontFamily: "Bebas Neue, sans-serif" }}>{creator.follower_count.toLocaleString()}</p>
+            <p className="text-[7px] tracking-wider opacity-30 mt-0.5" style={{ fontFamily: "Bebas Neue, sans-serif" }}>FOLLOWERS</p>
+          </div>
+          <div className="flex-1 text-center border-r border-black/8">
+            <p className="text-xs font-black leading-none" style={{ fontFamily: "Bebas Neue, sans-serif" }}>{creator.catalog_count}</p>
+            <p className="text-[7px] tracking-wider opacity-30 mt-0.5" style={{ fontFamily: "Bebas Neue, sans-serif" }}>CATALOGS</p>
+          </div>
+          <div className="flex-1 text-center">
+            <p className="text-xs font-black leading-none" style={{ fontFamily: "Bebas Neue, sans-serif" }}>{creator.post_count}</p>
+            <p className="text-[7px] tracking-wider opacity-30 mt-0.5" style={{ fontFamily: "Bebas Neue, sans-serif" }}>POSTS</p>
+          </div>
+        </div>
+      </div>
+    </div>
+  );
+}
+
 // ─── Main Page ────────────────────────────────────────────────────────────────
 
 function DiscoverContent() {
@@ -712,6 +879,7 @@ function DiscoverContent() {
   const [items, setItems] = useState<GridItem[]>([]);
   const [spotlightCatalogs, setSpotlightCatalogs] = useState<SpotlightCatalog[]>([]);
   const [followRecs, setFollowRecs] = useState<RecommendedProfile[]>([]);
+  const [creators, setCreators] = useState<CreatorProfile[]>([]);
   const [loading, setLoading] = useState(true);
   const [currentUserId, setCurrentUserId] = useState<string | null>(null);
   const [isOnboarded, setIsOnboarded] = useState(false);
@@ -780,9 +948,10 @@ function DiscoverContent() {
     const userId = overrideUserId !== undefined ? overrideUserId : currentUserId;
     try {
       await Promise.all([
-        fetchItems(userId, mode),
+        mode !== "creators" ? fetchItems(userId, mode) : Promise.resolve(),
         fetchSpotlights(userId),
         mode === "following" ? fetchFollowRecs(userId) : Promise.resolve(),
+        mode === "creators" ? fetchCreators(userId) : Promise.resolve(),
       ]);
     } finally {
       setLoading(false);
@@ -945,6 +1114,74 @@ function DiscoverContent() {
     }
   }
 
+  // ─── fetchCreators ────────────────────────────────────────────────────────
+  async function fetchCreators(userId: string | null) {
+    try {
+      // Get all onboarded profiles
+      const { data: profileRows } = await supabase
+        .from("profiles")
+        .select("id,username,full_name,avatar_url,is_onboarded,is_verified")
+        .eq("is_onboarded", true)
+        .not("username", "is", null)
+        .limit(60);
+
+      if (!profileRows || profileRows.length === 0) { setCreators([]); return; }
+
+      const profileIds = profileRows.map((p: any) => p.id);
+
+      // Get real follower counts, catalog counts, post counts in parallel
+      const [followerRows, catalogRows, postRows, followingRows] = await Promise.all([
+        supabase.from("followers").select("following_id").in("following_id", profileIds),
+        supabase.from("catalogs").select("id,owner_id").in("owner_id", profileIds).eq("visibility", "public"),
+        supabase.from("feed_posts").select("id,owner_id").in("owner_id", profileIds),
+        userId
+          ? supabase.from("followers").select("following_id").eq("follower_id", userId)
+          : Promise.resolve({ data: [] }),
+      ]);
+
+      // Build count maps
+      const followerCounts: Record<string, number> = {};
+      (followerRows.data || []).forEach((r: any) => {
+        followerCounts[r.following_id] = (followerCounts[r.following_id] || 0) + 1;
+      });
+
+      const catalogCounts: Record<string, number> = {};
+      (catalogRows.data || []).forEach((r: any) => {
+        catalogCounts[r.owner_id] = (catalogCounts[r.owner_id] || 0) + 1;
+      });
+
+      const postCounts: Record<string, number> = {};
+      (postRows.data || []).forEach((r: any) => {
+        postCounts[r.owner_id] = (postCounts[r.owner_id] || 0) + 1;
+      });
+
+      const followingSet = new Set(
+        ((followingRows as any).data || []).map((r: any) => r.following_id)
+      );
+
+      const result: CreatorProfile[] = profileRows
+        .map((p: any) => ({
+          id: p.id,
+          username: p.username,
+          full_name: p.full_name ?? null,
+          avatar_url: p.avatar_url ?? null,
+          follower_count: followerCounts[p.id] ?? 0,
+          catalog_count: catalogCounts[p.id] ?? 0,
+          post_count: postCounts[p.id] ?? 0,
+          is_following: followingSet.has(p.id),
+          is_verified: !!p.is_verified,
+        }))
+        // Only show creators with at least 1 catalog or post
+        .filter((c) => c.catalog_count > 0 || c.post_count > 0)
+        .sort((a, b) => b.follower_count - a.follower_count);
+
+      setCreators(result);
+    } catch (err) {
+      console.error("fetchCreators error:", err);
+      setCreators([]);
+    }
+  }
+
   // ─── fetchSpotlights ───────────────────────────────────────────────────────
   async function fetchSpotlights(userId: string | null) {
     try {
@@ -1084,15 +1321,21 @@ function DiscoverContent() {
       setFollowRecs((prev) => prev.map((p) =>
         p.id === profileId ? { ...p, is_following: !currently } : p
       ));
+      setCreators((prev) => prev.map((c) =>
+        c.id === profileId ? { ...c, is_following: !currently } : c
+      ));
     } catch (err) { console.error(err); }
   }
 
   function handleItemClick(item: GridItem) {
-    if (item.type === "feed_post" && item.feed_post_id) {
-      navigate(`/feed/${item.feed_post_id}`);
-    } else {
-      setExpandedItem(item);
+    if (item.type === "feed_post") {
+      // Route to /post/:id — same as profile page
+      if (item.feed_post_id) {
+        navigate(`/post/${item.feed_post_id}`);
+      }
+      return;
     }
+    setExpandedItem(item);
   }
 
   function changeMode(m: DiscoverMode) {
@@ -1144,7 +1387,7 @@ function DiscoverContent() {
     return nodes;
   }
 
-  const modeLabel: Record<DiscoverMode, string> = { trending: "TRENDING", new: "NEW DROPS", following: "FOLLOWING" };
+  const modeLabel: Record<DiscoverMode, string> = { trending: "TRENDING", new: "NEW DROPS", following: "FOLLOWING", creators: "CREATORS" };
 
   return (
     <>
@@ -1160,7 +1403,7 @@ function DiscoverContent() {
       */}
       <div
         ref={scrollRef}
-        className="h-screen overflow-y-auto overscroll-none bg-white text-black"
+        className={`h-screen overscroll-none bg-white text-black relative ${expandedItem || searchOpen ? "overflow-hidden" : "overflow-y-auto"}`}
         style={{ WebkitOverflowScrolling: "touch" }}
       >
         {/* ── Sticky header ── */}
@@ -1175,13 +1418,13 @@ function DiscoverContent() {
               className="flex items-center gap-1.5 pb-3 hover:opacity-40 transition-opacity"
             >
               <span className="text-xl leading-none">⌕</span>
-              <span className="text-[10px] tracking-[0.3em] font-black hidden md:inline opacity-40" style={{ fontFamily: "Bebas Neue, sans-serif" }}>SEARCH</span>
+              <span className="text-[10px] tracking-[0.3em] font-black opacity-40" style={{ fontFamily: "Bebas Neue, sans-serif" }}>SEARCH</span>
             </button>
           </div>
 
           {/* Mode tabs */}
           <div className="flex px-5 md:px-10 gap-0 border-t border-black/8">
-            {(["trending", "new", "following"] as DiscoverMode[]).map((m) => (
+            {(["trending", "new", "following", "creators"] as DiscoverMode[]).map((m) => (
               <button
                 key={m}
                 onClick={() => changeMode(m)}
@@ -1195,8 +1438,8 @@ function DiscoverContent() {
             ))}
           </div>
 
-          {/* Category chips */}
-          <div className="border-t border-black/8 overflow-x-auto scrollbar-none">
+          {/* Category chips — hidden on creators tab */}
+          <div className={`border-t border-black/8 overflow-x-auto scrollbar-none ${mode === "creators" ? "hidden" : ""}`}>
             <div className="flex gap-1.5 px-5 md:px-10 py-2 min-w-max">
               {categories.map((cat) => (
                 <button
@@ -1217,11 +1460,38 @@ function DiscoverContent() {
         </div>
 
         {/* ── Content ── */}
-        <div className="px-5 md:px-10 py-5 max-w-7xl mx-auto">
+        <div className="px-5 md:px-10 py-5 pb-32 max-w-7xl mx-auto">
 
           {loading ? (
             <div className="flex items-center justify-center py-32">
               <p className="text-[10px] tracking-[0.5em] opacity-20 animate-pulse" style={{ fontFamily: "Bebas Neue, sans-serif" }}>LOADING</p>
+            </div>
+
+          ) : mode === "creators" ? (
+            <div className="py-4">
+              <div className="flex items-baseline justify-between mb-5">
+                <p className="text-[9px] tracking-[0.4em] opacity-25 font-black" style={{ fontFamily: "Bebas Neue, sans-serif" }}>
+                  CREATORS — {creators.length}
+                </p>
+              </div>
+              {creators.length === 0 ? (
+                <div className="flex items-center justify-center py-32">
+                  <p className="text-2xl tracking-wider opacity-20" style={{ fontFamily: "Bebas Neue, sans-serif" }}>NO CREATORS YET</p>
+                </div>
+              ) : (
+                <div className="grid grid-cols-2 md:grid-cols-3 lg:grid-cols-4 xl:grid-cols-5 gap-3 md:gap-4">
+                  {creators.map((creator) => (
+                    <CreatorCard
+                      key={creator.id}
+                      creator={creator}
+                      currentUserId={currentUserId}
+                      isOnboarded={isOnboarded}
+                      onFollow={(id, following) => toggleFollow(id, following)}
+                      onNavigate={(username) => navigate(`/${username}`)}
+                    />
+                  ))}
+                </div>
+              )}
             </div>
 
           ) : mode === "following" && !currentUserId ? (
