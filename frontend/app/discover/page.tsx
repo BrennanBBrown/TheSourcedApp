@@ -1,15 +1,16 @@
 "use client";
 
-import { useEffect, useState, Suspense } from "react";
+import { useEffect, useState, useRef, useCallback, Suspense } from "react";
 import { supabase } from "@/lib/supabase/client";
-import { useRouter, useSearchParams } from "next/navigation";
+import { useRouter } from "next/navigation";
 
-// Force dynamic rendering
-export const dynamic = 'force-dynamic';
+export const dynamic = "force-dynamic";
 
-type SearchTab = "items" | "catalogs" | "profiles";
+// ─── Types ────────────────────────────────────────────────────────────────────
 
-type SearchItem = {
+type DiscoverMode = "trending" | "new" | "following";
+
+type GridItem = {
   id: string;
   title: string;
   image_url: string;
@@ -18,959 +19,1132 @@ type SearchItem = {
   seller: string | null;
   like_count: number;
   is_liked: boolean;
-  is_monetized?: boolean; // ← NEW
-  category?: string;
+  is_monetized: boolean;
   brand?: string;
-  primary_color?: string;
   style_tags?: string[];
-  catalog: {
-    id: string;
-    name: string;
-    slug: string;
-    owner: {
-      username: string;
-    };
-  };
+  created_at: string;
+  // catalog_item fields
+  catalog_id?: string;
+  catalog_name?: string;
+  catalog_slug?: string;
+  owner_username?: string;
+  // feed_post fields
+  feed_post_id?: string;
+  // discriminator
+  type: "catalog_item" | "feed_post";
 };
 
-type SearchCatalog = {
+type SpotlightCatalog = {
   id: string;
   name: string;
   description: string | null;
   image_url: string | null;
-  visibility: string;
   bookmark_count: number;
   is_bookmarked: boolean;
   item_count: number;
   slug: string;
-  owner: {
-    username: string;
-    avatar_url: string | null;
-  };
+  owner_username: string;
+  owner_avatar: string | null;
 };
 
-type SearchProfile = {
+type RecommendedProfile = {
   id: string;
   username: string;
   full_name: string | null;
   avatar_url: string | null;
-  bio: string | null;
   follower_count: number;
   is_following: boolean;
-  standing?: string;
-  badges?: string[];
-  is_verified?: boolean;
+  is_verified: boolean;
 };
 
-// Smart search knowledge base
-const SEARCH_KNOWLEDGE = {
-  // Synonym mappings
-  synonyms: {
-    'shirt': ['top', 'tee', 'blouse', 'button-up', 'oxford'],
-    'pants': ['trousers', 'bottoms', 'jeans', 'slacks'],
-    'shoes': ['sneakers', 'boots', 'loafers', 'heels', 'sandals'],
-    'jacket': ['coat', 'outerwear', 'blazer', 'parka'],
-    'bag': ['purse', 'tote', 'backpack', 'satchel', 'clutch'],
-    'dress': ['gown', 'frock', 'sundress'],
-    'sweater': ['pullover', 'cardigan', 'knit', 'jumper'],
-  },
-
-  // Brand nicknames and expansions
-  brandMappings: {
-    'rick': 'rick owens',
-    'raf': 'raf simons',
-    'cav empt': 'cav empt',
-    'yeezy': 'yeezy',
-    'chrome': 'chrome hearts',
-    'undercover': 'undercover',
-    'cdg': 'comme des garcons',
-    'supreme': 'supreme',
-    'bape': 'a bathing ape',
-    'visvim': 'visvim',
-    'kapital': 'kapital',
-    'junya': 'junya watanabe',
-  },
-
-  // Style/aesthetic to category/brand mappings
-  aesthetics: {
-    'streetwear': { brands: ['supreme', 'stussy', 'bape', 'palace'], categories: ['hoodies', 'tees', 'sneakers'] },
-    'techwear': { brands: ['acronym', 'stone island', 'arc\'teryx'], categories: ['outerwear', 'bags', 'accessories'] },
-    'minimalist': { brands: ['acne studios', 'apc', 'lemaire'], colors: ['black', 'white', 'gray', 'beige'] },
-    'avant-garde': { brands: ['rick owens', 'julius', 'yohji yamamoto'], colors: ['black'] },
-    'vintage': { categories: ['denim', 'outerwear'], keywords: ['vintage', 'retro', 'classic'] },
-    'gorpcore': { brands: ['patagonia', 'north face', 'arc\'teryx'], categories: ['outerwear', 'fleece'] },
-    'preppy': { brands: ['ralph lauren', 'brooks brothers', 'j.crew'], categories: ['blazers', 'loafers'] },
-  },
-
-  // Price tier keywords
-  priceTiers: {
-    'cheap': 'budget',
-    'budget': 'budget',
-    'affordable': 'budget',
-    'expensive': 'luxury',
-    'luxury': 'luxury',
-    'designer': 'luxury',
-    'high-end': 'luxury',
-  },
-
-  // Color variations
-  colorVariations: {
-    'black': ['onyx', 'midnight', 'noir', 'ebony'],
-    'white': ['cream', 'ivory', 'off-white', 'bone'],
-    'blue': ['navy', 'indigo', 'azure', 'cobalt'],
-    'gray': ['grey', 'charcoal', 'slate'],
-    'brown': ['tan', 'camel', 'chocolate', 'khaki', 'beige'],
-  },
+type SearchResult = {
+  items: GridItem[];
+  catalogs: SpotlightCatalog[];
+  profiles: RecommendedProfile[];
 };
+
+// ─── Module-level scroll cache (persists across Next.js soft navigations) ─────
+const cache = {
+  scrollY: 0,
+  mode: "trending" as DiscoverMode,
+  category: "all",
+};
+
+// ─── Helpers ──────────────────────────────────────────────────────────────────
+
+// Safe number coerce — Supabase sometimes returns bigint columns as strings
+const num = (v: unknown): number => (typeof v === "number" ? v : Number(v) || 0);
+
+// ─── ProfileChip (for follow recommendations) ────────────────────────────────
+
+function ProfileChip({
+  profile,
+  currentUserId,
+  isOnboarded,
+  onFollow,
+  onNavigate,
+}: {
+  profile: RecommendedProfile;
+  currentUserId: string | null;
+  isOnboarded: boolean;
+  onFollow: (id: string, following: boolean) => void;
+  onNavigate: (username: string) => void;
+}) {
+  return (
+    <div
+      className="flex items-center gap-3 p-3 border border-black/10 hover:border-black/30 transition-all cursor-pointer bg-white min-w-[200px]"
+      style={{ borderRadius: "50px" }}
+      onClick={() => onNavigate(profile.username)}
+    >
+      <div className="w-9 h-9 rounded-full border border-black/20 overflow-hidden flex-shrink-0">
+        {profile.avatar_url ? (
+          <img src={profile.avatar_url} alt="" className="w-full h-full object-cover" />
+        ) : (
+          <div className="w-full h-full bg-black/5 flex items-center justify-center text-xs opacity-30">👤</div>
+        )}
+      </div>
+      <div className="flex-1 min-w-0">
+        <p className="text-xs font-black tracking-tight truncate" style={{ fontFamily: "Archivo Black, sans-serif" }}>
+          @{profile.username}
+        </p>
+        <p className="text-[9px] opacity-40 tracking-wider" style={{ fontFamily: "Bebas Neue, sans-serif" }}>
+          {num(profile.follower_count).toLocaleString()} FOLLOWERS
+        </p>
+      </div>
+      {currentUserId && currentUserId !== profile.id && (
+        <button
+          onClick={(e) => {
+            e.stopPropagation();
+            if (!isOnboarded) return;
+            onFollow(profile.id, profile.is_following);
+          }}
+          className={`flex-shrink-0 px-2.5 py-1 text-[9px] tracking-wider font-black border transition-all ${
+            profile.is_following
+              ? "bg-black text-white border-black"
+              : "border-black/30 hover:border-black hover:bg-black/5"
+          }`}
+          style={{ fontFamily: "Bebas Neue, sans-serif", borderRadius: "50px" }}
+        >
+          {profile.is_following ? "FOLLOWING" : "FOLLOW"}
+        </button>
+      )}
+    </div>
+  );
+}
+
+// ─── ItemCard ─────────────────────────────────────────────────────────────────
+
+function ItemCard({
+  item,
+  onLike,
+  onExpand,
+  onClick,
+}: {
+  item: GridItem;
+  onLike: (id: string, liked: boolean) => void;
+  onExpand: (item: GridItem) => void;
+  onClick: (item: GridItem) => void;
+}) {
+  const isFeed = item.type === "feed_post";
+  return (
+    <div className="group border border-black/10 hover:border-black transition-all duration-150 bg-white">
+      <div
+        className="aspect-square bg-black/5 overflow-hidden cursor-pointer relative"
+        onClick={() => onClick(item)}
+      >
+        <img
+          src={item.image_url}
+          alt={item.title}
+          className="w-full h-full object-cover group-hover:scale-[1.02] transition-transform duration-300"
+          loading="lazy"
+        />
+        {item.is_monetized && (
+          <div
+            className="absolute top-2 right-2 w-5 h-5 bg-black/25 backdrop-blur-sm flex items-center justify-center"
+            title="Affiliate — creator earns commission"
+          >
+            <span className="text-[9px] font-black text-white" style={{ fontFamily: "Bebas Neue, sans-serif" }}>$</span>
+          </div>
+        )}
+        {isFeed && (
+          <div className="absolute bottom-2 left-2 px-1.5 py-0.5 bg-black/40 backdrop-blur-sm">
+            <span className="text-[8px] tracking-[0.15em] text-white font-black" style={{ fontFamily: "Bebas Neue, sans-serif" }}>POST</span>
+          </div>
+        )}
+      </div>
+      <div className="p-3 border-t border-black/10">
+        <p className="text-[11px] font-black tracking-wide uppercase leading-tight truncate mb-1.5" style={{ fontFamily: "Bebas Neue, sans-serif" }}>
+          {item.title}
+        </p>
+        <div className="flex items-center justify-between text-[9px] tracking-wider opacity-40 mb-2">
+          {item.seller && <span className="truncate mr-2">{item.seller}</span>}
+          {item.price && <span className="flex-shrink-0 font-black">${item.price}</span>}
+        </div>
+        {item.brand && (
+          <p className="text-[9px] tracking-wider opacity-25 mb-2 uppercase truncate">{item.brand}</p>
+        )}
+        <div className="flex gap-1.5">
+          {!isFeed ? (
+            <>
+              <button
+                onClick={(e) => { e.stopPropagation(); onLike(item.id, item.is_liked); }}
+                className={`flex-1 py-1.5 border text-[9px] tracking-wider font-black transition-all ${
+                  item.is_liked ? "bg-black text-white border-black" : "border-black/20 hover:border-black hover:bg-black/5"
+                }`}
+                style={{ fontFamily: "Bebas Neue, sans-serif" }}
+              >
+                {item.is_liked ? `♥ ${item.like_count}` : `♡ ${item.like_count}`}
+              </button>
+              <button
+                onClick={(e) => { e.stopPropagation(); onExpand(item); }}
+                className="px-3 py-1.5 border border-black/20 hover:border-black hover:bg-black/5 transition-all text-[9px] font-black tracking-wider"
+                style={{ fontFamily: "Bebas Neue, sans-serif" }}
+              >
+                VIEW
+              </button>
+            </>
+          ) : (
+            <button
+              onClick={(e) => { e.stopPropagation(); onClick(item); }}
+              className="flex-1 py-1.5 border border-black/20 hover:border-black hover:bg-black/5 transition-all text-[9px] font-black tracking-wider"
+              style={{ fontFamily: "Bebas Neue, sans-serif" }}
+            >
+              VIEW POST ↗
+            </button>
+          )}
+        </div>
+      </div>
+    </div>
+  );
+}
+
+// ─── CatalogSpotlightCard ─────────────────────────────────────────────────────
+
+function CatalogSpotlight({
+  catalog,
+  onBookmark,
+  onNavigate,
+}: {
+  catalog: SpotlightCatalog;
+  onBookmark: (id: string, currently: boolean) => void;
+  onNavigate: (path: string) => void;
+}) {
+  return (
+    <div
+      className="col-span-2 border border-black/10 hover:border-black transition-all cursor-pointer flex overflow-hidden bg-white group"
+      onClick={() => onNavigate(`/${catalog.owner_username}/${catalog.slug}`)}
+    >
+      <div className="w-28 md:w-44 flex-shrink-0 bg-black/5 overflow-hidden">
+        {catalog.image_url ? (
+          <img src={catalog.image_url} alt={catalog.name} className="w-full h-full object-cover group-hover:scale-[1.03] transition-transform duration-300" loading="lazy" />
+        ) : (
+          <div className="w-full h-full flex items-center justify-center">
+            <span className="text-4xl opacity-10">✦</span>
+          </div>
+        )}
+      </div>
+      <div className="flex-1 p-4 flex flex-col justify-between min-w-0">
+        <div>
+          <p className="text-[9px] tracking-[0.3em] opacity-30 mb-0.5 font-black" style={{ fontFamily: "Bebas Neue, sans-serif" }}>CATALOG SPOTLIGHT</p>
+          <h3 className="text-base md:text-xl font-black tracking-tighter leading-tight mb-1" style={{ fontFamily: "Archivo Black, sans-serif" }}>
+            {catalog.name}
+          </h3>
+          {catalog.description && (
+            <p className="text-[10px] opacity-40 line-clamp-2 mb-2">{catalog.description}</p>
+          )}
+          <button
+            className="flex items-center gap-1.5 hover:opacity-60 transition-opacity"
+            onClick={(e) => { e.stopPropagation(); onNavigate(`/${catalog.owner_username}`); }}
+          >
+            <div className="w-4 h-4 rounded-full border border-black/30 overflow-hidden">
+              {catalog.owner_avatar ? (
+                <img src={catalog.owner_avatar} alt="" className="w-full h-full object-cover" />
+              ) : (
+                <div className="w-full h-full bg-black/5" />
+              )}
+            </div>
+            <span className="text-[9px] tracking-wider opacity-50" style={{ fontFamily: "Bebas Neue, sans-serif" }}>@{catalog.owner_username}</span>
+          </button>
+        </div>
+        <div className="flex items-center justify-between mt-2">
+          <div className="flex gap-3 text-[9px] tracking-wider opacity-40" style={{ fontFamily: "Bebas Neue, sans-serif" }}>
+            <span>{catalog.item_count} ITEMS</span>
+            <span>{catalog.bookmark_count} SAVES</span>
+          </div>
+          <button
+            onClick={(e) => { e.stopPropagation(); onBookmark(catalog.id, catalog.is_bookmarked); }}
+            className={`px-2.5 py-1 border text-[9px] tracking-wider font-black transition-all ${
+              catalog.is_bookmarked ? "bg-black text-white border-black" : "border-black/20 hover:border-black"
+            }`}
+            style={{ fontFamily: "Bebas Neue, sans-serif" }}
+          >
+            {catalog.is_bookmarked ? "🔖 SAVED" : "SAVE"}
+          </button>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+// ─── ExpandedItemModal ────────────────────────────────────────────────────────
+
+function ItemModal({
+  item,
+  onClose,
+  onLike,
+  onNavigate,
+  currentUserId,
+  isOnboarded,
+  onRequireLogin,
+}: {
+  item: GridItem;
+  onClose: () => void;
+  onLike: (id: string, liked: boolean) => void;
+  onNavigate: (path: string) => void;
+  currentUserId: string | null;
+  isOnboarded: boolean;
+  onRequireLogin: () => void;
+}) {
+  useEffect(() => {
+    document.body.style.overflow = "hidden";
+    const h = (e: KeyboardEvent) => { if (e.key === "Escape") onClose(); };
+    window.addEventListener("keydown", h);
+    return () => {
+      document.body.style.overflow = "";
+      window.removeEventListener("keydown", h);
+    };
+  }, [onClose]);
+
+  function handleLike() {
+    if (!currentUserId || !isOnboarded) { onRequireLogin(); return; }
+    onLike(item.id, item.is_liked);
+  }
+
+  return (
+    <div
+      className="fixed inset-0 z-50 flex items-end md:items-center justify-center bg-black/85 backdrop-blur-sm"
+      onClick={onClose}
+    >
+      <div
+        className="relative w-full md:max-w-2xl bg-white"
+        onClick={(e) => e.stopPropagation()}
+      >
+        <button
+          onClick={onClose}
+          className="absolute top-3 right-3 z-10 w-7 h-7 flex items-center justify-center bg-black/5 hover:bg-black/10 transition-colors text-xs font-black"
+          style={{ fontFamily: "Bebas Neue, sans-serif" }}
+        >
+          ✕
+        </button>
+        <div className="flex flex-col md:flex-row">
+          {/* Image */}
+          <div className="w-full md:w-64 aspect-square flex-shrink-0 bg-black/5">
+            <img src={item.image_url} alt={item.title} className="w-full h-full object-contain" />
+          </div>
+          {/* Info */}
+          <div className="flex-1 p-5 flex flex-col justify-between min-h-0">
+            <div className="space-y-2 mb-4">
+              <div>
+                <h2 className="text-lg md:text-2xl font-black tracking-tighter leading-tight" style={{ fontFamily: "Archivo Black, sans-serif" }}>
+                  {item.title}
+                </h2>
+                {item.is_monetized && (
+                  <p className="text-[8px] tracking-[0.3em] opacity-30 mt-0.5" style={{ fontFamily: "Bebas Neue, sans-serif" }}>
+                    $ AFFILIATED — CREATOR EARNS COMMISSION
+                  </p>
+                )}
+              </div>
+              {item.brand && <p className="text-[10px] tracking-wider opacity-50 uppercase">Brand: {item.brand}</p>}
+              {item.seller && <p className="text-[10px] tracking-wider opacity-50 uppercase">Seller: {item.seller}</p>}
+              {item.price && (
+                <p className="text-xl font-black" style={{ fontFamily: "Bebas Neue, sans-serif" }}>${item.price}</p>
+              )}
+              {item.style_tags && item.style_tags.length > 0 && (
+                <div className="flex flex-wrap gap-1">
+                  {item.style_tags.slice(0, 5).map((tag, i) => (
+                    <span key={i} className="px-1.5 py-0.5 bg-black/5 text-[8px] tracking-wider border border-black/10" style={{ fontFamily: "Bebas Neue, sans-serif" }}>
+                      {tag}
+                    </span>
+                  ))}
+                </div>
+              )}
+            </div>
+            <div className="space-y-2">
+              <button
+                onClick={handleLike}
+                className={`w-full py-2.5 border-2 text-[10px] tracking-[0.3em] font-black transition-all ${
+                  item.is_liked ? "bg-black text-white border-black" : "border-black hover:bg-black hover:text-white"
+                }`}
+                style={{ fontFamily: "Bebas Neue, sans-serif" }}
+              >
+                {item.is_liked ? "♥ LIKED" : "♡ LIKE"} ({item.like_count})
+              </button>
+              {item.product_url && (
+                <button
+                  onClick={() => {
+                    try { fetch("/api/track-click", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ itemId: item.id, itemType: "catalog", userId: currentUserId }) }); } catch {}
+                    window.open(item.product_url!, "_blank");
+                  }}
+                  className="w-full py-2.5 bg-black text-white hover:bg-white hover:text-black border-2 border-black transition-all text-[10px] tracking-[0.3em] font-black"
+                  style={{ fontFamily: "Bebas Neue, sans-serif" }}
+                >
+                  VIEW PRODUCT ↗
+                </button>
+              )}
+              {item.catalog_slug && item.owner_username && (
+                <button
+                  onClick={() => { onClose(); onNavigate(`/${item.owner_username}/${item.catalog_slug}`); }}
+                  className="w-full py-2 border border-black/20 hover:border-black hover:bg-black/5 transition-all text-[9px] tracking-[0.3em] font-black"
+                  style={{ fontFamily: "Bebas Neue, sans-serif" }}
+                >
+                  IN: {item.catalog_name}
+                </button>
+              )}
+            </div>
+          </div>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+// ─── SearchOverlay ────────────────────────────────────────────────────────────
+
+function SearchOverlay({
+  onClose,
+  currentUserId,
+  onNavigate,
+}: {
+  onClose: () => void;
+  currentUserId: string | null;
+  onNavigate: (path: string) => void;
+}) {
+  const [q, setQ] = useState("");
+  const [searching, setSearching] = useState(false);
+  const [results, setResults] = useState<SearchResult>({ items: [], catalogs: [], profiles: [] });
+  const [expandedItem, setExpandedItem] = useState<GridItem | null>(null);
+  const inputRef = useRef<HTMLInputElement>(null);
+  const timer = useRef<NodeJS.Timeout | null>(null);
+
+  useEffect(() => {
+    inputRef.current?.focus();
+    document.body.style.overflow = "hidden";
+    const h = (e: KeyboardEvent) => { if (e.key === "Escape") { if (expandedItem) setExpandedItem(null); else onClose(); } };
+    window.addEventListener("keydown", h);
+    return () => { document.body.style.overflow = ""; window.removeEventListener("keydown", h); };
+  }, [onClose, expandedItem]);
+
+  useEffect(() => {
+    if (timer.current) clearTimeout(timer.current);
+    if (!q.trim()) { setResults({ items: [], catalogs: [], profiles: [] }); return; }
+    timer.current = setTimeout(() => search(q.trim()), 300);
+  }, [q]);
+
+  async function search(query: string) {
+    setSearching(true);
+    try {
+      // Fire all queries in parallel — completely independent, no joins that can conflict
+      const [itemsRes, catalogsRes, profilesByUser, profilesByName] = await Promise.all([
+
+        // ── Items: simple text search on own columns, then soft-join catalog data ──
+        supabase
+          .from("catalog_items")
+          .select("id,title,image_url,product_url,price,seller,like_count,is_monetized,brand,style_tags,created_at,catalog_id")
+          .or(`title.ilike.%${query}%,brand.ilike.%${query}%,seller.ilike.%${query}%,category.ilike.%${query}%`)
+          .limit(24),
+
+        // ── Catalogs ──────────────────────────────────────────────────────────
+        supabase
+          .from("catalogs")
+          .select("id,name,description,image_url,bookmark_count,slug,owner_id")
+          .eq("visibility", "public")
+          .or(`name.ilike.%${query}%,description.ilike.%${query}%`)
+          .limit(6),
+
+        // ── Profiles: select * exactly like the working original, filter client-side
+        supabase
+          .from("profiles")
+          .select("*")
+          .limit(50),
+
+        // placeholder so Promise.all indices stay aligned
+        Promise.resolve({ data: [], error: null }),
+      ]);
+
+      // Enrich catalog items: two plain queries — no join hints
+      const catalogIds = [...new Set((itemsRes.data || []).map((i: any) => i.catalog_id).filter(Boolean))];
+      let catalogMap: Record<string, { name: string; slug: string; owner_username: string }> = {};
+      if (catalogIds.length > 0) {
+        const { data: catalogRows } = await supabase
+          .from("catalogs")
+          .select("id,name,slug,owner_id")
+          .in("id", catalogIds);
+        const ownerIds2 = [...new Set((catalogRows || []).map((c: any) => c.owner_id).filter(Boolean))];
+        let ownerMap2: Record<string, string> = {};
+        if (ownerIds2.length > 0) {
+          const { data: ownerRows2 } = await supabase.from("profiles").select("id,username").in("id", ownerIds2);
+          (ownerRows2 || []).forEach((p: any) => { ownerMap2[p.id] = p.username ?? ""; });
+        }
+        (catalogRows || []).forEach((c: any) => {
+          catalogMap[c.id] = { name: c.name, slug: c.slug, owner_username: ownerMap2[c.owner_id] ?? "" };
+        });
+      }
+
+      const items: GridItem[] = (itemsRes.data || []).map((item: any) => {
+        const cat = catalogMap[item.catalog_id] ?? {};
+        return {
+          id: item.id,
+          title: item.title,
+          image_url: item.image_url,
+          product_url: item.product_url,
+          price: item.price,
+          seller: item.seller,
+          like_count: num(item.like_count),
+          is_liked: false,
+          is_monetized: !!item.is_monetized,
+          brand: item.brand,
+          style_tags: item.style_tags,
+          created_at: item.created_at,
+          catalog_id: item.catalog_id,
+          catalog_name: cat.name,
+          catalog_slug: cat.slug,
+          owner_username: cat.owner_username,
+          type: "catalog_item",
+        };
+      });
+
+      // Enrich catalog search results with owner usernames
+      const catSearchOwnerIds = [...new Set((catalogsRes.data || []).map((c: any) => c.owner_id).filter(Boolean))];
+      let catSearchOwnerMap: Record<string, { username: string; avatar_url: string | null }> = {};
+      if (catSearchOwnerIds.length > 0) {
+        const { data: catSearchOwners } = await supabase.from("profiles").select("id,username,avatar_url").in("id", catSearchOwnerIds);
+        (catSearchOwners || []).forEach((p: any) => { catSearchOwnerMap[p.id] = { username: p.username ?? "", avatar_url: p.avatar_url ?? null }; });
+      }
+      const catalogs: SpotlightCatalog[] = (catalogsRes.data || []).map((c: any) => {
+        const owner = catSearchOwnerMap[c.owner_id] ?? { username: "", avatar_url: null };
+        return {
+          id: c.id, name: c.name, description: c.description, image_url: c.image_url,
+          bookmark_count: num(c.bookmark_count), is_bookmarked: false, item_count: 0,
+          slug: c.slug, owner_username: owner.username, owner_avatar: owner.avatar_url,
+        };
+      });
+
+      // Filter + sort profiles client-side (same approach as working original)
+      const allProfiles = (profilesByUser.data || [])
+        .filter((p: any) => p.is_onboarded === true && p.username)
+        .filter((p: any) => {
+          const q = query.toLowerCase();
+          return (
+            p.username?.toLowerCase().includes(q) ||
+            p.full_name?.toLowerCase().includes(q) ||
+            p.bio?.toLowerCase().includes(q)
+          );
+        });
+      // Get real follower counts from followers table
+      const searchProfileIds = allProfiles.map((p: any) => p.id);
+      let searchFollowerCounts: Record<string, number> = {};
+      if (searchProfileIds.length > 0) {
+        const { data: sfRows } = await supabase
+          .from("followers")
+          .select("following_id")
+          .in("following_id", searchProfileIds);
+        (sfRows || []).forEach((r: any) => {
+          searchFollowerCounts[r.following_id] = (searchFollowerCounts[r.following_id] || 0) + 1;
+        });
+      }
+      const profiles: RecommendedProfile[] = allProfiles
+        .map((p: any) => ({
+          id: p.id, username: p.username, full_name: p.full_name ?? null,
+          avatar_url: p.avatar_url ?? null,
+          follower_count: searchFollowerCounts[p.id] ?? 0,
+          is_following: false, is_verified: !!p.is_verified,
+        }))
+        .sort((a: any, b: any) => b.follower_count - a.follower_count)
+        .slice(0, 8);
+
+      setResults({ items, catalogs, profiles });
+    } finally {
+      setSearching(false);
+    }
+  }
+
+  function handleItemClick(item: GridItem) {
+    if (item.type === "feed_post" && item.feed_post_id) {
+      onNavigate(`/feed/${item.feed_post_id}`); onClose();
+    } else {
+      setExpandedItem(item);
+    }
+  }
+
+  const hasResults = results.items.length > 0 || results.catalogs.length > 0 || results.profiles.length > 0;
+
+  return (
+    <div className="fixed inset-0 z-50 bg-white flex flex-col">
+      {/* Search input */}
+      <div className="border-b-2 border-black flex items-center px-5 md:px-10 gap-3 h-16 flex-shrink-0">
+        <span className="text-xl opacity-30 select-none flex-shrink-0">⌕</span>
+        <input
+          ref={inputRef}
+          type="text"
+          value={q}
+          onChange={(e) => setQ(e.target.value)}
+          placeholder="SEARCH"
+          className="flex-1 bg-transparent tracking-wider placeholder-black/25 focus:outline-none"
+          style={{ fontFamily: "Bebas Neue, sans-serif", fontSize: "16px" }}
+        />
+        {searching && (
+          <span className="text-[9px] tracking-[0.4em] opacity-30 animate-pulse flex-shrink-0" style={{ fontFamily: "Bebas Neue, sans-serif" }}>SEARCHING</span>
+        )}
+        <button onClick={onClose} className="text-[10px] tracking-[0.3em] opacity-40 hover:opacity-100 transition-opacity font-black flex-shrink-0" style={{ fontFamily: "Bebas Neue, sans-serif" }}>
+          [ESC]
+        </button>
+      </div>
+
+      {/* Results */}
+      <div className="flex-1 overflow-y-auto overscroll-contain">
+        {!q.trim() ? (
+          <div className="flex items-center justify-center h-full opacity-15">
+            <p className="text-4xl tracking-[0.2em]" style={{ fontFamily: "Bebas Neue, sans-serif" }}>TYPE TO SEARCH</p>
+          </div>
+        ) : !hasResults && !searching ? (
+          <div className="flex items-center justify-center h-full opacity-15">
+            <p className="text-3xl tracking-[0.2em]" style={{ fontFamily: "Bebas Neue, sans-serif" }}>NO RESULTS</p>
+          </div>
+        ) : (
+          <div className="px-5 md:px-10 py-6 space-y-8 max-w-5xl mx-auto">
+
+            {/* Profiles */}
+            {results.profiles.length > 0 && (
+              <section>
+                <p className="text-[9px] tracking-[0.4em] opacity-30 mb-3 font-black border-b border-black/8 pb-2" style={{ fontFamily: "Bebas Neue, sans-serif" }}>
+                  CREATORS — {results.profiles.length}
+                </p>
+                <div className="grid grid-cols-1 md:grid-cols-2 gap-2">
+                  {results.profiles.map((profile) => (
+                    <div
+                      key={profile.id}
+                      className="flex items-center gap-3 p-3 border border-black/10 hover:border-black/40 transition-all cursor-pointer"
+                      style={{ borderRadius: "50px" }}
+                      onClick={() => { onNavigate(`/${profile.username}`); onClose(); }}
+                    >
+                      <div className="w-9 h-9 rounded-full border border-black/20 overflow-hidden flex-shrink-0">
+                        {profile.avatar_url ? <img src={profile.avatar_url} alt="" className="w-full h-full object-cover" /> : <div className="w-full h-full bg-black/5" />}
+                      </div>
+                      <div className="flex-1 min-w-0">
+                        <p className="text-sm font-black tracking-tighter truncate" style={{ fontFamily: "Archivo Black, sans-serif" }}>@{profile.username}</p>
+                        {profile.full_name && <p className="text-[9px] opacity-40 truncate">{profile.full_name}</p>}
+                      </div>
+                      <p className="text-[9px] opacity-35 tracking-wider flex-shrink-0" style={{ fontFamily: "Bebas Neue, sans-serif" }}>
+                        {num(profile.follower_count).toLocaleString()} FOLLOWERS
+                      </p>
+                    </div>
+                  ))}
+                </div>
+              </section>
+            )}
+
+            {/* Items */}
+            {results.items.length > 0 && (
+              <section>
+                <p className="text-[9px] tracking-[0.4em] opacity-30 mb-3 font-black border-b border-black/8 pb-2" style={{ fontFamily: "Bebas Neue, sans-serif" }}>
+                  ITEMS — {results.items.length}
+                </p>
+                <div className="grid grid-cols-2 md:grid-cols-4 lg:grid-cols-6 gap-3">
+                  {results.items.map((item) => (
+                    <ItemCard key={item.id} item={item} onLike={() => {}} onExpand={setExpandedItem} onClick={handleItemClick} />
+                  ))}
+                </div>
+              </section>
+            )}
+
+            {/* Catalogs */}
+            {results.catalogs.length > 0 && (
+              <section>
+                <p className="text-[9px] tracking-[0.4em] opacity-30 mb-3 font-black border-b border-black/8 pb-2" style={{ fontFamily: "Bebas Neue, sans-serif" }}>
+                  CATALOGS — {results.catalogs.length}
+                </p>
+                <div className="grid grid-cols-1 md:grid-cols-2 gap-2">
+                  {results.catalogs.map((c) => (
+                    <div
+                      key={c.id}
+                      className="flex items-center gap-3 p-3 border border-black/10 hover:border-black/40 transition-all cursor-pointer"
+                      onClick={() => { onNavigate(`/${c.owner_username}/${c.slug}`); onClose(); }}
+                    >
+                      <div className="w-12 h-12 bg-black/5 flex-shrink-0 overflow-hidden">
+                        {c.image_url ? <img src={c.image_url} alt="" className="w-full h-full object-cover" /> : <div className="w-full h-full flex items-center justify-center text-xl opacity-10">✦</div>}
+                      </div>
+                      <div className="min-w-0">
+                        <p className="font-black tracking-tighter truncate text-sm" style={{ fontFamily: "Archivo Black, sans-serif" }}>{c.name}</p>
+                        <p className="text-[9px] opacity-40 tracking-wider" style={{ fontFamily: "Bebas Neue, sans-serif" }}>@{c.owner_username}</p>
+                      </div>
+                    </div>
+                  ))}
+                </div>
+              </section>
+            )}
+          </div>
+        )}
+      </div>
+
+      {/* Expanded item within search */}
+      {expandedItem && (
+        <ItemModal
+          item={expandedItem}
+          onClose={() => setExpandedItem(null)}
+          onLike={() => {}}
+          onNavigate={(path) => { onNavigate(path); onClose(); }}
+          currentUserId={currentUserId}
+          isOnboarded={false}
+          onRequireLogin={() => {}}
+        />
+      )}
+    </div>
+  );
+}
+
+// ─── Main Page ────────────────────────────────────────────────────────────────
 
 function DiscoverContent() {
   const router = useRouter();
-  const searchParams = useSearchParams();
-  const initialTab = (searchParams.get("tab") as SearchTab) || "items";
-  const initialQuery = searchParams.get("q") || "";
 
-  const [activeTab, setActiveTab] = useState<SearchTab>(initialTab);
-  const [searchQuery, setSearchQuery] = useState(initialQuery);
-  const [loading, setLoading] = useState(false);
+  const [mode, setMode] = useState<DiscoverMode>(cache.mode);
+  const [category, setCategory] = useState(cache.category);
+  const [items, setItems] = useState<GridItem[]>([]);
+  const [spotlightCatalogs, setSpotlightCatalogs] = useState<SpotlightCatalog[]>([]);
+  const [followRecs, setFollowRecs] = useState<RecommendedProfile[]>([]);
+  const [loading, setLoading] = useState(true);
   const [currentUserId, setCurrentUserId] = useState<string | null>(null);
   const [isOnboarded, setIsOnboarded] = useState(false);
+  const [expandedItem, setExpandedItem] = useState<GridItem | null>(null);
+  const [searchOpen, setSearchOpen] = useState(false);
+  const [showLoginPrompt, setShowLoginPrompt] = useState(false);
+  const scrollRef = useRef<HTMLDivElement>(null);
+  const restoredScroll = useRef(false);
 
-  // Filter states
-  const [selectedCategory, setSelectedCategory] = useState<string>("all");
-  const [selectedColor, setSelectedColor] = useState<string>("all");
-  const [selectedGender, setSelectedGender] = useState<string>("all");
-  const [selectedSeason, setSelectedSeason] = useState<string>("all");
-  const [priceRange, setPriceRange] = useState<string>("all");
-  const [sortBy, setSortBy] = useState<string>("relevance");
-
-  const [items, setItems] = useState<SearchItem[]>([]);
-  const [catalogs, setCatalogs] = useState<SearchCatalog[]>([]);
-  const [profiles, setProfiles] = useState<SearchProfile[]>([]);
-
-  const [expandedItem, setExpandedItem] = useState<SearchItem | null>(null);
-  const [showLoginMessage, setShowLoginMessage] = useState(false);
-  const [showFilters, setShowFilters] = useState(false);
-
-  // Filter options
   const categories = [
-    { value: "all", label: "All Items" },
-    { value: "tops", label: "Tops" },
-    { value: "bottoms", label: "Bottoms" },
-    { value: "shoes", label: "Shoes" },
-    { value: "outerwear", label: "Outerwear" },
-    { value: "dresses", label: "Dresses" },
-    { value: "activewear", label: "Activewear" },
-    { value: "accessories", label: "Accessories" },
-    { value: "bags", label: "Bags" },
-    { value: "jewelry", label: "Jewelry" }
+    { v: "all", l: "ALL" }, { v: "tops", l: "TOPS" }, { v: "bottoms", l: "BOTTOMS" },
+    { v: "shoes", l: "SHOES" }, { v: "outerwear", l: "OUTERWEAR" },
+    { v: "accessories", l: "ACCESSORIES" }, { v: "bags", l: "BAGS" },
+    { v: "dresses", l: "DRESSES" }, { v: "activewear", l: "ACTIVEWEAR" },
+    { v: "jewelry", l: "JEWELRY" },
   ];
 
-  const colors = [
-    { value: "all", label: "All Colors" },
-    { value: "black", label: "Black" },
-    { value: "white", label: "White" },
-    { value: "gray", label: "Gray" },
-    { value: "brown", label: "Brown" },
-    { value: "beige", label: "Beige" },
-    { value: "blue", label: "Blue" },
-    { value: "green", label: "Green" },
-    { value: "red", label: "Red" },
-    { value: "pink", label: "Pink" },
-    { value: "purple", label: "Purple" },
-    { value: "yellow", label: "Yellow" },
-    { value: "orange", label: "Orange" }
-  ];
-
-  const genders = [
-    { value: "all", label: "All" },
-    { value: "men", label: "Men" },
-    { value: "women", label: "Women" },
-    { value: "unisex", label: "Unisex" }
-  ];
-
-  const seasons = [
-    { value: "all", label: "All Seasons" },
-    { value: "spring", label: "Spring" },
-    { value: "summer", label: "Summer" },
-    { value: "fall", label: "Fall" },
-    { value: "winter", label: "Winter" },
-    { value: "all-season", label: "Year-Round" }
-  ];
-
-  const priceRanges = [
-    { value: "all", label: "All Prices" },
-    { value: "budget", label: "Budget (<$50)" },
-    { value: "mid-range", label: "Mid-Range ($50-$200)" },
-    { value: "luxury", label: "Luxury ($200+)" }
-  ];
-
-  const sortOptions = [
-    { value: "relevance", label: "Most Relevant" },
-    { value: "popular", label: "Most Popular" },
-    { value: "recent", label: "Most Recent" }
-  ];
-
+  // ── Auth ──────────────────────────────────────────────────────────────────
   useEffect(() => {
-    loadCurrentUser();
+    (async () => {
+      const { data: { user } } = await supabase.auth.getUser();
+      if (user) {
+        setCurrentUserId(user.id);
+        const { data } = await supabase.from("profiles").select("is_onboarded").eq("id", user.id).single();
+        setIsOnboarded(!!data?.is_onboarded);
+      }
+    })();
   }, []);
 
+  // ── Scroll tracking — write to cache on every scroll ─────────────────────
   useEffect(() => {
-    if (searchQuery.trim()) {
-      performSearch();
-    } else {
-      loadDefaultContent();
+    const el = scrollRef.current;
+    if (!el) return;
+    const onScroll = () => { cache.scrollY = el.scrollTop; };
+    el.addEventListener("scroll", onScroll, { passive: true });
+    return () => el.removeEventListener("scroll", onScroll);
+  }, []);
+
+  // ── Restore scroll after initial data load ────────────────────────────────
+  useEffect(() => {
+    if (!loading && !restoredScroll.current && cache.scrollY > 0) {
+      restoredScroll.current = true;
+      const el = scrollRef.current;
+      if (el) el.scrollTop = cache.scrollY;
     }
-  }, [activeTab, currentUserId, selectedCategory, selectedColor, selectedGender, selectedSeason, priceRange, sortBy]);
+  }, [loading]);
 
-  async function loadCurrentUser() {
-    const { data: { user } } = await supabase.auth.getUser();
+  // ── Data loading ──────────────────────────────────────────────────────────
+  useEffect(() => {
+    // Don't reload just because currentUserId set; wait for explicit mode/category change
+    loadData();
+  }, [mode, category]);
 
-    if (user) {
-      setCurrentUserId(user.id);
-
-      const { data: profile } = await supabase
-        .from('profiles')
-        .select('is_onboarded')
-        .eq('id', user.id)
-        .single();
-
-      setIsOnboarded(profile?.is_onboarded || false);
+  // Reload when auth resolves — pass userId directly so fetchItems gets it immediately
+  const prevUserIdRef = useRef<string | null>("UNSET");
+  useEffect(() => {
+    if (currentUserId !== prevUserIdRef.current) {
+      prevUserIdRef.current = currentUserId;
+      loadData(currentUserId);
     }
-  }
+  }, [currentUserId]);
 
-  async function loadDefaultContent() {
+  async function loadData(overrideUserId?: string | null) {
     setLoading(true);
+    // Use overrideUserId if provided (auth-triggered), otherwise use current state
+    const userId = overrideUserId !== undefined ? overrideUserId : currentUserId;
     try {
-      if (activeTab === "items") {
-        await searchItems("");
-      } else if (activeTab === "catalogs") {
-        await searchCatalogs("");
-      } else if (activeTab === "profiles") {
-        console.log('Loading default profiles...');
-        await searchProfiles("");
-      }
-    } catch (error) {
-      console.error('Error loading default content:', error);
+      await Promise.all([
+        fetchItems(userId, mode),
+        fetchSpotlights(userId),
+        mode === "following" ? fetchFollowRecs(userId) : Promise.resolve(),
+      ]);
     } finally {
       setLoading(false);
     }
   }
 
-        // Track click function
-    async function trackClick(itemId: string, itemType: 'catalog' | 'feed') {
-      try {
-        await fetch('/api/track-click', {
-          method: 'POST',
-          headers: {
-            'Content-Type': 'application/json',
-          },
-          body: JSON.stringify({
-            itemId,
-            itemType,
-            userId: currentUserId
-          }),
+  // ─── fetchItems ────────────────────────────────────────────────────────────
+  async function fetchItems(userId: string | null, currentMode?: DiscoverMode) {
+    try {
+      let catalogItems: any[] = [];
+      let feedItems: any[] = [];
+
+      const activeMode = currentMode ?? mode;
+      if (activeMode === "following") {
+        // ── Step 1: who does the user follow ───────────────────────────────
+        if (!userId) { console.log("[FOLLOWING] no userId, bailing"); setItems([]); return; }
+
+        const { data: followRows, error: followErr } = await supabase
+          .from("followers")
+          .select("following_id")
+          .eq("follower_id", userId);
+
+        if (followErr) throw followErr;
+
+        const followedIds: string[] = (followRows || []).map((r: any) => r.following_id);
+        if (followedIds.length === 0) { console.log("[FOLLOWING] no followed users"); setItems([]); return; }
+
+        // ── Step 2: get catalog IDs owned by followed users ─────────────────
+        const { data: ownedCats, error: catErr } = await supabase
+          .from("catalogs")
+          .select("id")
+          .in("owner_id", followedIds)
+          .eq("visibility", "public");
+
+        if (catErr) throw catErr;
+        const ownedCatIds: string[] = (ownedCats || []).map((c: any) => c.id);
+
+        // ── Step 3: get feed post IDs from followed users ───────────────────
+        const { data: ownedPosts, error: postErr } = await supabase
+          .from("feed_posts")
+          .select("id")
+          .in("owner_id", followedIds);
+
+        if (postErr) throw postErr;
+        const ownedPostIds: string[] = (ownedPosts || []).map((p: any) => p.id);
+
+        // ── Step 4: fetch catalog items by catalog_id — NO join filters ─────
+        if (ownedCatIds.length > 0) {
+          let q = supabase
+            .from("catalog_items")
+            .select("id,title,image_url,product_url,price,seller,like_count,is_monetized,brand,style_tags,created_at,catalog_id")
+            .in("catalog_id", ownedCatIds)
+            .order("created_at", { ascending: false })
+            .limit(50);
+          if (category !== "all") q = q.eq("category", category);
+          const { data, error } = await q;
+          console.log("[FOLLOWING] catalogItems:", data?.length, "error:", error);
+          catalogItems = data || [];
+        }
+
+        // ── Step 5: fetch feed post items by feed_post_id — NO join filters ─
+        if (ownedPostIds.length > 0) {
+          const { data } = await supabase
+            .from("feed_post_items")
+            .select("id,title,image_url,product_url,price,seller,like_count,created_at,feed_post_id")
+            .in("feed_post_id", ownedPostIds)
+            .order("created_at", { ascending: false })
+            .limit(10);
+          feedItems = data || [];
+        }
+
+      } else {
+        // ── Trending / New ──────────────────────────────────────────────────
+        const orderCol = mode === "trending" ? "like_count" : "created_at";
+
+        let catQ = supabase
+          .from("catalog_items")
+          .select("id,title,image_url,product_url,price,seller,like_count,is_monetized,brand,style_tags,created_at,catalog_id")
+          .order(orderCol, { ascending: false })
+          .limit(48);
+        if (category !== "all") catQ = catQ.eq("category", category);
+
+        const feedQ = supabase
+          .from("feed_post_items")
+          .select("id,title,image_url,product_url,price,seller,like_count,created_at,feed_post_id")
+          .order(orderCol, { ascending: false })
+          .limit(8);
+
+        const [catRes, feedRes] = await Promise.all([catQ, feedQ]);
+        catalogItems = catRes.data || [];
+        feedItems = feedRes.data || [];
+      }
+
+      // ── Enrich: catalog info + owner usernames via two plain queries ─────────
+      const catalogIds = [...new Set(catalogItems.map((i: any) => i.catalog_id).filter(Boolean))];
+      let catalogInfoMap: Record<string, { name: string; slug: string; owner_username: string }> = {};
+      if (catalogIds.length > 0) {
+        const { data: catInfoRows } = await supabase
+          .from("catalogs")
+          .select("id,name,slug,owner_id")
+          .in("id", catalogIds);
+        const ownerIds = [...new Set((catInfoRows || []).map((c: any) => c.owner_id).filter(Boolean))];
+        let ownerMap: Record<string, string> = {};
+        if (ownerIds.length > 0) {
+          const { data: ownerRows } = await supabase.from("profiles").select("id,username").in("id", ownerIds);
+          (ownerRows || []).forEach((p: any) => { ownerMap[p.id] = p.username ?? ""; });
+        }
+        (catInfoRows || []).forEach((c: any) => {
+          catalogInfoMap[c.id] = { name: c.name, slug: c.slug, owner_username: ownerMap[c.owner_id] ?? "" };
         });
-      } catch (error) {
-        console.error('Error tracking click:', error);
-        // Don't block navigation if tracking fails
-      }
-    }
-
-    // Handle item click with tracking
-    function handleItemClick(item: SearchItem, e: React.MouseEvent) {
-      e.stopPropagation();
-
-      if (item.product_url) {
-        // Determine if it's a catalog item or feed item based on catalog.id
-        const itemType = item.catalog.id === 'feed' ? 'feed' : 'catalog';
-
-        // Track the click
-        trackClick(item.id, itemType);
-
-        // Open the link
-        window.open(item.product_url, '_blank');
-      }
-    }
-
-  async function performSearch() {
-    if (!searchQuery.trim()) {
-      loadDefaultContent();
-      return;
-    }
-
-    setLoading(true);
-    try {
-      if (activeTab === "items") {
-        await searchItems(searchQuery);
-      } else if (activeTab === "catalogs") {
-        await searchCatalogs(searchQuery);
-      } else if (activeTab === "profiles") {
-        await searchProfiles(searchQuery);
-      }
-    } finally {
-      setLoading(false);
-    }
-  }
-
-  // Enhanced search intelligence
-  function parseSmartQuery(query: string) {
-    const lowerQuery = query.toLowerCase();
-    const words = lowerQuery.split(' ').filter(w => w.length > 0);
-
-    let detectedFilters = {
-      colors: [] as string[],
-      brands: [] as string[],
-      categories: [] as string[],
-      priceTier: null as string | null,
-      aesthetic: null as string | null,
-      expandedTerms: [] as string[],
-    };
-
-    // Detect aesthetic
-    for (const [aesthetic, config] of Object.entries(SEARCH_KNOWLEDGE.aesthetics)) {
-      if (lowerQuery.includes(aesthetic)) {
-        detectedFilters.aesthetic = aesthetic;
-        if ('brands' in config && config.brands) detectedFilters.brands.push(...config.brands);
-        if ('categories' in config && config.categories) detectedFilters.categories.push(...config.categories);
-        if ('colors' in config && config.colors) detectedFilters.colors.push(...config.colors);
-      }
-    }
-
-    // Detect colors (including variations)
-    for (const [mainColor, variations] of Object.entries(SEARCH_KNOWLEDGE.colorVariations)) {
-      if (lowerQuery.includes(mainColor) || variations.some(v => lowerQuery.includes(v))) {
-        if (!detectedFilters.colors.includes(mainColor)) {
-          detectedFilters.colors.push(mainColor);
-        }
-      }
-    }
-
-    // Detect price tier keywords
-    for (const [keyword, tier] of Object.entries(SEARCH_KNOWLEDGE.priceTiers)) {
-      if (lowerQuery.includes(keyword)) {
-        detectedFilters.priceTier = tier;
-      }
-    }
-
-    // Expand brand nicknames
-    for (const [nickname, fullName] of Object.entries(SEARCH_KNOWLEDGE.brandMappings)) {
-      if (lowerQuery.includes(nickname)) {
-        detectedFilters.brands.push(fullName);
-        detectedFilters.expandedTerms.push(fullName);
-      }
-    }
-
-    // Expand synonyms
-    words.forEach(word => {
-      for (const [mainTerm, synonyms] of Object.entries(SEARCH_KNOWLEDGE.synonyms)) {
-        if (word === mainTerm || synonyms.includes(word)) {
-          detectedFilters.expandedTerms.push(mainTerm, ...synonyms);
-          if (categories.find(c => c.value === mainTerm || synonyms.includes(c.value))) {
-            detectedFilters.categories.push(mainTerm);
-          }
-        }
-      }
-    });
-
-    return detectedFilters;
-  }
-
-  async function searchItems(query: string) {
-  try {
-    const smartFilters = parseSmartQuery(query);
-
-    // ===== QUERY CATALOG ITEMS =====
-    let catalogItemsQuery = supabase
-      .from('catalog_items')
-      .select(`
-        id,
-        title,
-        image_url,
-        product_url,
-        price,
-        seller,
-        like_count,
-        is_monetized,
-        category,
-        subcategory,
-        brand,
-        primary_color,
-        colors,
-        style_tags,
-        material,
-        pattern,
-        season,
-        formality,
-        gender,
-        price_tier,
-        created_at,
-        catalogs!inner(id, name, slug, visibility, profiles!inner(username))
-      `)
-      .eq('catalogs.visibility', 'public');
-
-    // Apply manual filters to catalog items
-    if (selectedCategory !== "all") {
-      catalogItemsQuery = catalogItemsQuery.eq('category', selectedCategory);
-    }
-    if (selectedColor !== "all") {
-      catalogItemsQuery = catalogItemsQuery.contains('colors', [selectedColor]);
-    }
-    if (selectedGender !== "all") {
-      catalogItemsQuery = catalogItemsQuery.eq('gender', selectedGender);
-    }
-    if (selectedSeason !== "all") {
-      catalogItemsQuery = catalogItemsQuery.eq('season', selectedSeason);
-    }
-    if (priceRange !== "all") {
-      catalogItemsQuery = catalogItemsQuery.eq('price_tier', priceRange);
-    } else if (smartFilters.priceTier) {
-      catalogItemsQuery = catalogItemsQuery.eq('price_tier', smartFilters.priceTier);
-    }
-
-    // Apply sorting to catalog items
-    if (sortBy === "popular") {
-      catalogItemsQuery = catalogItemsQuery.order('like_count', { ascending: false });
-    } else if (sortBy === "recent") {
-      catalogItemsQuery = catalogItemsQuery.order('created_at', { ascending: false });
-    }
-
-    catalogItemsQuery = catalogItemsQuery.limit(50);
-
-    // Apply search query to catalog items
-    if (query.trim()) {
-      catalogItemsQuery = catalogItemsQuery.or(
-        `title.ilike.%${query}%,` +
-        `brand.ilike.%${query}%,` +
-        `seller.ilike.%${query}%,` +
-        `category.ilike.%${query}%,` +
-        `subcategory.ilike.%${query}%,` +
-        `primary_color.ilike.%${query}%,` +
-        `material.ilike.%${query}%,` +
-        `pattern.ilike.%${query}%,` +
-        `season.ilike.%${query}%,` +
-        `formality.ilike.%${query}%,` +
-        `gender.ilike.%${query}%`
-      );
-    }
-
-    // ===== QUERY FEED POST ITEMS =====
-    let feedItemsQuery = supabase
-      .from('feed_post_items')
-      .select(`
-        id,
-        title,
-        image_url,
-        product_url,
-        price,
-        seller,
-        like_count,
-        created_at
-      `);
-
-    // Apply manual filters to feed items
-    if (selectedCategory !== "all") {
-      feedItemsQuery = feedItemsQuery.eq('category', selectedCategory);
-    }
-    if (selectedColor !== "all") {
-      feedItemsQuery = feedItemsQuery.contains('colors', [selectedColor]);
-    }
-    if (selectedGender !== "all") {
-      feedItemsQuery = feedItemsQuery.eq('gender', selectedGender);
-    }
-    if (selectedSeason !== "all") {
-      feedItemsQuery = feedItemsQuery.eq('season', selectedSeason);
-    }
-    if (priceRange !== "all") {
-      feedItemsQuery = feedItemsQuery.eq('price_tier', priceRange);
-    } else if (smartFilters.priceTier) {
-      feedItemsQuery = feedItemsQuery.eq('price_tier', smartFilters.priceTier);
-    }
-
-    // Apply sorting to feed items
-    if (sortBy === "popular") {
-      feedItemsQuery = feedItemsQuery.order('like_count', { ascending: false });
-    } else if (sortBy === "recent") {
-      feedItemsQuery = feedItemsQuery.order('created_at', { ascending: false });
-    }
-
-    feedItemsQuery = feedItemsQuery.limit(50);
-
-    // Apply search query to feed items
-    if (query.trim()) {
-      feedItemsQuery = feedItemsQuery.or(
-        `title.ilike.%${query}%,` +
-        `brand.ilike.%${query}%,` +
-        `seller.ilike.%${query}%,` +
-        `category.ilike.%${query}%,` +
-        `subcategory.ilike.%${query}%,` +
-        `primary_color.ilike.%${query}%,` +
-        `material.ilike.%${query}%,` +
-        `pattern.ilike.%${query}%,` +
-        `season.ilike.%${query}%,` +
-        `formality.ilike.%${query}%,` +
-        `gender.ilike.%${query}%`
-      );
-    }
-
-    // Execute both queries
-    const [catalogResult, feedResult] = await Promise.all([
-      catalogItemsQuery,
-      feedItemsQuery
-    ]);
-
-    if (catalogResult.error) throw catalogResult.error;
-    if (feedResult.error) throw feedResult.error;
-
-    // Get liked items from both tables
-    let likedItemIds: Set<string> = new Set();
-    if (currentUserId) {
-      const { data: catalogLikedData } = await supabase
-        .from('liked_items')
-        .select('item_id')
-        .eq('user_id', currentUserId);
-
-      const { data: feedLikedData } = await supabase
-        .from('liked_feed_post_items')
-        .select('item_id')
-        .eq('user_id', currentUserId);
-
-      if (catalogLikedData) {
-        catalogLikedData.forEach(like => likedItemIds.add(like.item_id));
-      }
-      if (feedLikedData) {
-        feedLikedData.forEach(like => likedItemIds.add(like.item_id));
-      }
-    }
-
-    // Format catalog items
-    let formattedCatalogItems = catalogResult.data.map((item: any) => ({
-      ...item,
-      is_liked: likedItemIds.has(item.id),
-      catalog: {
-        id: item.catalogs.id,
-        name: item.catalogs.name,
-        slug: item.catalogs.slug,
-        owner: {
-          username: item.catalogs.profiles.username
-        }
-      }
-    }));
-
-    // Format feed items
-    let formattedFeedItems = feedResult.data.map((item: any) => ({
-      ...item,
-      is_liked: likedItemIds.has(item.id),
-      is_monetized: false, // feed items are never monetized
-      catalog: {
-        id: 'feed',
-        name: 'Feed Post',
-        slug: 'feed',
-        owner: {
-          username: 'feed'
-        }
-      }
-    }));
-
-    // Combine both arrays
-    let formattedItems = [...formattedCatalogItems, ...formattedFeedItems];
-
-    // GENIUS RANKING ALGORITHM (keep existing algorithm code)
-    if (query.trim() && sortBy === "relevance") {
-      const lowerQuery = query.toLowerCase();
-      const queryWords = lowerQuery.split(' ').filter(w => w.length > 0);
-
-      formattedItems = formattedItems.sort((a, b) => {
-        const getGeniusScore = (item: any) => {
-          let score = 0;
-
-          // === EXACT MATCHES (Highest Priority) ===
-          if (item.title?.toLowerCase() === lowerQuery) score += 1000;
-          if (item.brand?.toLowerCase() === lowerQuery) score += 800;
-          if (item.category?.toLowerCase() === lowerQuery) score += 600;
-
-          // === EXPANDED TERM MATCHES ===
-          smartFilters.expandedTerms.forEach(term => {
-            if (item.title?.toLowerCase().includes(term)) score += 400;
-            if (item.brand?.toLowerCase().includes(term)) score += 350;
-            if (item.category?.toLowerCase().includes(term)) score += 300;
-          });
-
-          // === PARTIAL MATCHES ===
-          if (item.title?.toLowerCase().includes(lowerQuery)) score += 500;
-          if (item.brand?.toLowerCase().includes(lowerQuery)) score += 400;
-          if (item.subcategory?.toLowerCase().includes(lowerQuery)) score += 300;
-          if (item.seller?.toLowerCase().includes(lowerQuery)) score += 200;
-
-          // === MULTI-WORD QUERY BONUSES ===
-          queryWords.forEach(word => {
-            if (item.title?.toLowerCase().includes(word)) score += 100;
-            if (item.brand?.toLowerCase().includes(word)) score += 80;
-            if (item.category?.toLowerCase().includes(word)) score += 60;
-            if (item.subcategory?.toLowerCase().includes(word)) score += 40;
-          });
-
-          // === STYLE TAGS MATCH ===
-          if (item.style_tags?.some((tag: string) => tag.toLowerCase().includes(lowerQuery))) score += 350;
-          queryWords.forEach(word => {
-            if (item.style_tags?.some((tag: string) => tag.toLowerCase().includes(word))) score += 80;
-          });
-
-          // === COLOR INTELLIGENCE ===
-          smartFilters.colors.forEach(color => {
-            if (item.primary_color?.toLowerCase() === color) score += 250;
-            if (item.colors?.includes(color)) score += 200;
-          });
-
-          // === BRAND INTELLIGENCE ===
-          smartFilters.brands.forEach(brand => {
-            if (item.brand?.toLowerCase().includes(brand)) score += 400;
-          });
-
-          // === CATEGORY INTELLIGENCE ===
-          smartFilters.categories.forEach(category => {
-            if (item.category?.toLowerCase() === category) score += 300;
-            if (item.subcategory?.toLowerCase() === category) score += 200;
-          });
-
-          // === MATERIAL & PATTERN MATCHING ===
-          if (item.material?.toLowerCase().includes(lowerQuery)) score += 150;
-          if (item.pattern?.toLowerCase().includes(lowerQuery)) score += 150;
-
-          queryWords.forEach(word => {
-            if (item.material?.toLowerCase().includes(word)) score += 50;
-            if (item.pattern?.toLowerCase().includes(word)) score += 50;
-          });
-
-          // === CONTEXTUAL BONUSES ===
-          if (smartFilters.colors.length > 0 && smartFilters.categories.length > 0) {
-            const hasColor = smartFilters.colors.some(c =>
-              item.primary_color?.toLowerCase() === c || item.colors?.includes(c)
-            );
-            const hasCategory = smartFilters.categories.some(cat =>
-              item.category?.toLowerCase() === cat
-            );
-            if (hasColor && hasCategory) score += 400;
-          }
-
-          // Aesthetic match bonus
-          if (smartFilters.aesthetic) {
-            const aestheticConfig = SEARCH_KNOWLEDGE.aesthetics[smartFilters.aesthetic as keyof typeof SEARCH_KNOWLEDGE.aesthetics];
-            if ('brands' in aestheticConfig && aestheticConfig.brands?.some(b => item.brand?.toLowerCase().includes(b))) score += 300;
-            if ('colors' in aestheticConfig && aestheticConfig.colors?.some(c => item.primary_color?.toLowerCase() === c)) score += 200;
-          }
-
-          // === POPULARITY & RECENCY BOOST (Secondary) ===
-          const likesBonus = Math.min((item.like_count || 0) * 2, 100);
-          const recencyBonus = (() => {
-            const daysSince = (Date.now() - new Date(item.created_at).getTime()) / (1000 * 60 * 60 * 24);
-            if (daysSince < 7) return 50;
-            if (daysSince < 30) return 25;
-            return 0;
-          })();
-
-          score += likesBonus + recencyBonus;
-
-          return score;
-        };
-
-        const scoreA = getGeniusScore(a);
-        const scoreB = getGeniusScore(b);
-
-        if (Math.abs(scoreA - scoreB) < 50) {
-          return (b.like_count || 0) - (a.like_count || 0);
-        }
-
-        return scoreB - scoreA;
-      });
-    } else if (sortBy === "relevance" && !query.trim()) {
-      // No search query, just sort by likes
-      formattedItems = formattedItems.sort((a, b) => (b.like_count || 0) - (a.like_count || 0));
-    }
-
-    setItems(formattedItems);
-  } catch (error) {
-    console.error('Error searching items:', error);
-    setItems([]);
-  }
-}
-
-  async function searchCatalogs(query: string) {
-    try {
-      let catalogsQuery = supabase
-        .from('catalogs')
-        .select(`
-          id,
-          name,
-          description,
-          image_url,
-          visibility,
-          bookmark_count,
-          slug,
-          profiles!catalogs_owner_id_fkey(username, avatar_url)
-        `)
-        .eq('visibility', 'public')
-        .order('created_at', { ascending: false })
-        .limit(50);
-
-      if (query.trim()) {
-        catalogsQuery = catalogsQuery.or(
-          `name.ilike.%${query}%,` +
-          `description.ilike.%${query}%`
-        );
       }
 
-      const { data, error } = await catalogsQuery;
-
-      if (error) throw error;
-
-      let bookmarkedCatalogIds: Set<string> = new Set();
-      if (currentUserId) {
-        const { data: bookmarkedData } = await supabase
-          .from('bookmarked_catalogs')
-          .select('catalog_id')
-          .eq('user_id', currentUserId);
-
-        if (bookmarkedData) {
-          bookmarkedCatalogIds = new Set(bookmarkedData.map(b => b.catalog_id));
-        }
+      // ── Liked IDs ──────────────────────────────────────────────────────────
+      let likedIds = new Set<string>();
+      if (userId) {
+        const { data: liked } = await supabase
+          .from("liked_items")
+          .select("item_id")
+          .eq("user_id", userId);
+        (liked || []).forEach((l: any) => likedIds.add(l.item_id));
       }
 
-      const catalogsWithCounts = await Promise.all(
-        data.map(async (catalog: any) => {
-          const { count } = await supabase
-            .from('catalog_items')
-            .select('*', { count: 'exact', head: true })
-            .eq('catalog_id', catalog.id);
-
+      // ── Format catalog items ───────────────────────────────────────────────
+      const formattedCatalog: GridItem[] = catalogItems
+        .filter((i: any) => i.catalog_id && catalogInfoMap[i.catalog_id])
+        .map((i: any) => {
+          const cat = catalogInfoMap[i.catalog_id];
           return {
-            ...catalog,
-            is_bookmarked: bookmarkedCatalogIds.has(catalog.id),
-            item_count: count || 0,
-            owner: Array.isArray(catalog.profiles) ? catalog.profiles[0] : catalog.profiles
+            id: i.id, title: i.title, image_url: i.image_url, product_url: i.product_url,
+            price: i.price, seller: i.seller, like_count: num(i.like_count),
+            is_liked: likedIds.has(i.id), is_monetized: !!i.is_monetized,
+            brand: i.brand, style_tags: i.style_tags, created_at: i.created_at,
+            catalog_id: i.catalog_id, catalog_name: cat.name, catalog_slug: cat.slug,
+            owner_username: cat.owner_username, type: "catalog_item" as const,
           };
-        })
-      );
+        });
 
-      setCatalogs(catalogsWithCounts);
-    } catch (error) {
-      console.error('Error searching catalogs:', error);
-      setCatalogs([]);
-    }
-  }
-
-  async function searchProfiles(query: string) {
-    try {
-      console.log('Searching profiles with query:', query);
-
-      let profilesQuery = supabase
-        .from('profiles')
-        .select('*')
-        .limit(50);
-
-      if (query.trim()) {
-        profilesQuery = profilesQuery.or(
-          `username.ilike.%${query}%,` +
-          `full_name.ilike.%${query}%,` +
-          `bio.ilike.%${query}%`
-        );
-      }
-
-      const { data, error } = await profilesQuery;
-
-      console.log('Profiles data:', data);
-      console.log('Profiles error:', error);
-
-      if (error) {
-        console.error('Profiles query error:', error);
-        throw error;
-      }
-
-      if (!data || data.length === 0) {
-        console.log('No profiles found in database');
-        setProfiles([]);
-        return;
-      }
-
-      const onboardedProfiles = data.filter((p: any) =>
-        p.is_onboarded === true && p.username != null
-      );
-
-      console.log('Onboarded profiles:', onboardedProfiles.length);
-
-      onboardedProfiles.sort((a: any, b: any) =>
-        (b.follower_count || 0) - (a.follower_count || 0)
-      );
-
-      let followingIds: Set<string> = new Set();
-      if (currentUserId) {
-        const { data: followingData } = await supabase
-          .from('follows')
-          .select('following_id')
-          .eq('follower_id', currentUserId);
-
-        if (followingData) {
-          followingIds = new Set(followingData.map(f => f.following_id));
-        }
-      }
-
-      const profilesWithFollowing = onboardedProfiles.map((profile: any) => ({
-        id: profile.id,
-        username: profile.username,
-        full_name: profile.full_name,
-        avatar_url: profile.avatar_url,
-        bio: profile.bio,
-        follower_count: profile.follower_count || 0,
-        is_following: followingIds.has(profile.id),
-        standing: profile.standing || null,
-        badges: profile.badges || [],
-        is_verified: profile.is_verified || false
+      // ── Format feed items ──────────────────────────────────────────────────
+      const formattedFeed: GridItem[] = feedItems.map((i: any) => ({
+        id: i.id, title: i.title, image_url: i.image_url, product_url: i.product_url,
+        price: i.price, seller: i.seller, like_count: num(i.like_count),
+        is_liked: false, is_monetized: false, created_at: i.created_at,
+        feed_post_id: i.feed_post_id, type: "feed_post" as const,
+        catalog: { id: "feed", name: "", slug: "", owner: { username: "" } },
       }));
 
-      console.log('Final profiles to display:', profilesWithFollowing.length);
-      setProfiles(profilesWithFollowing);
-    } catch (error) {
-      console.error('Error searching profiles:', error);
-      setProfiles([]);
+      // ── Scatter feed items 1 per 8 catalog items ───────────────────────────
+      const merged: GridItem[] = [];
+      let fi = 0;
+      for (let i = 0; i < formattedCatalog.length; i++) {
+        if (i > 0 && i % 8 === 0 && fi < formattedFeed.length) merged.push(formattedFeed[fi++]);
+        merged.push(formattedCatalog[i]);
+      }
+      while (fi < formattedFeed.length) merged.push(formattedFeed[fi++]);
+
+      setItems(merged);
+    } catch (err) {
+      console.error("fetchItems error:", err);
+      setItems([]);
     }
   }
 
-  // ✅ UPDATED: Handle liking for both catalog items and feed post items
-async function toggleLike(itemId: string, currentlyLiked: boolean) {
-  if (!currentUserId || !isOnboarded) {
-    setShowLoginMessage(true);
-    return;
-  }
-
-  try {
-    // Check if this is a catalog item or feed post item
-    const { data: catalogItem } = await supabase
-      .from('catalog_items')
-      .select('id')
-      .eq('id', itemId)
-      .single();
-
-    const isCatalogItem = !!catalogItem;
-    const table = isCatalogItem ? 'liked_items' : 'liked_feed_post_items';
-
-    if (currentlyLiked) {
-      await supabase.from(table).delete()
-        .eq('user_id', currentUserId)
-        .eq('item_id', itemId);
-    } else {
-      await supabase.from(table)
-        .insert({ user_id: currentUserId, item_id: itemId });
-    }
-
-    setItems(prevItems =>
-      prevItems.map(item =>
-        item.id === itemId
-          ? { ...item, is_liked: !currentlyLiked, like_count: item.like_count + (currentlyLiked ? -1 : 1) }
-          : item
-      )
-    );
-
-    if (expandedItem?.id === itemId) {
-      setExpandedItem(prev => prev ? {
-        ...prev,
-        is_liked: !currentlyLiked,
-        like_count: prev.like_count + (currentlyLiked ? -1 : 1)
-      } : null);
-    }
-  } catch (error) {
-    console.error('Error toggling like:', error);
-  }
-}
-
-  async function toggleBookmark(catalogId: string, currentlyBookmarked: boolean) {
-    if (!currentUserId || !isOnboarded) {
-      setShowLoginMessage(true);
-      return;
-    }
-
+  // ─── fetchSpotlights ───────────────────────────────────────────────────────
+  async function fetchSpotlights(userId: string | null) {
     try {
-      if (currentlyBookmarked) {
-        await supabase.from('bookmarked_catalogs').delete()
-          .eq('user_id', currentUserId)
-          .eq('catalog_id', catalogId);
-      } else {
-        await supabase.from('bookmarked_catalogs')
-          .insert({ user_id: currentUserId, catalog_id: catalogId });
+      const { data } = await supabase
+        .from("catalogs")
+        .select("id,name,description,image_url,bookmark_count,slug,owner_id")
+        .eq("visibility", "public")
+        .order("bookmark_count", { ascending: false })
+        .limit(8);
+
+      let bookmarkedIds = new Set<string>();
+      if (userId) {
+        const { data: bm } = await supabase.from("bookmarked_catalogs").select("catalog_id").eq("user_id", userId);
+        (bm || []).forEach((b: any) => bookmarkedIds.add(b.catalog_id));
       }
 
-      setCatalogs(prevCatalogs =>
-        prevCatalogs.map(catalog =>
-          catalog.id === catalogId
-            ? { ...catalog, is_bookmarked: !currentlyBookmarked, bookmark_count: catalog.bookmark_count + (currentlyBookmarked ? -1 : 1) }
-            : catalog
-        )
-      );
-    } catch (error) {
-      console.error('Error toggling bookmark:', error);
-    }
-  }
-
-  async function toggleFollow(profileId: string, currentlyFollowing: boolean) {
-    if (!currentUserId || !isOnboarded) {
-      setShowLoginMessage(true);
-      return;
-    }
-
-    if (profileId === currentUserId) return;
-
-    try {
-      if (currentlyFollowing) {
-        await supabase.from('follows').delete()
-          .eq('follower_id', currentUserId)
-          .eq('following_id', profileId);
-      } else {
-        await supabase.from('follows')
-          .insert({ follower_id: currentUserId, following_id: profileId });
+      // Fetch owner usernames for spotlights in one batch
+      const spotOwnerIds = [...new Set((data || []).map((c: any) => c.owner_id).filter(Boolean))];
+      let spotOwnerMap: Record<string, { username: string; avatar_url: string | null }> = {};
+      if (spotOwnerIds.length > 0) {
+        const { data: spotOwners } = await supabase.from("profiles").select("id,username,avatar_url").in("id", spotOwnerIds);
+        (spotOwners || []).forEach((p: any) => { spotOwnerMap[p.id] = { username: p.username ?? "", avatar_url: p.avatar_url ?? null }; });
       }
 
-      setProfiles(prevProfiles =>
-        prevProfiles.map(profile =>
-          profile.id === profileId
-            ? { ...profile, is_following: !currentlyFollowing, follower_count: profile.follower_count + (currentlyFollowing ? -1 : 1) }
-            : profile
-        )
-      );
-    } catch (error) {
-      console.error('Error toggling follow:', error);
-    }
+      const enriched = await Promise.all((data || []).map(async (c: any) => {
+        const { count } = await supabase.from("catalog_items").select("*", { count: "exact", head: true }).eq("catalog_id", c.id);
+        const owner = spotOwnerMap[c.owner_id] ?? { username: "", avatar_url: null };
+        return {
+          id: c.id, name: c.name, description: c.description, image_url: c.image_url,
+          bookmark_count: num(c.bookmark_count), is_bookmarked: bookmarkedIds.has(c.id),
+          item_count: count || 0, slug: c.slug,
+          owner_username: owner.username, owner_avatar: owner.avatar_url,
+        };
+      }));
+      setSpotlightCatalogs(enriched);
+    } catch (err) { console.error("fetchSpotlights error:", err); }
   }
 
-  function handleSearch(e: React.FormEvent) {
-    e.preventDefault();
-    performSearch();
+  // ─── fetchFollowRecs ───────────────────────────────────────────────────────
+  async function fetchFollowRecs(userId: string | null) {
+    if (!userId) { setFollowRecs([]); return; }
+    try {
+      // Get who user already follows
+      const { data: followRows } = await supabase
+        .from("followers")
+        .select("following_id")
+        .eq("follower_id", userId);
+      const alreadyFollowing = new Set((followRows || []).map((r: any) => r.following_id));
+      alreadyFollowing.add(userId); // exclude self
+
+      // Get popular creators NOT already followed — count followers from followers table directly
+      const { data: profiles } = await supabase
+        .from("profiles")
+        .select("id,username,full_name,avatar_url,is_onboarded,is_verified")
+        .eq("is_onboarded", true)
+        .limit(50);
+
+      const candidates = (profiles || []).filter((p: any) => p.username && !alreadyFollowing.has(p.id));
+
+      // Get real follower counts from followers table for each candidate
+      const candidateIds = candidates.map((p: any) => p.id);
+      let realFollowerCounts: Record<string, number> = {};
+      if (candidateIds.length > 0) {
+        const { data: followerRows } = await supabase
+          .from("followers")
+          .select("following_id")
+          .in("following_id", candidateIds);
+        (followerRows || []).forEach((r: any) => {
+          realFollowerCounts[r.following_id] = (realFollowerCounts[r.following_id] || 0) + 1;
+        });
+      }
+
+      const recs: RecommendedProfile[] = candidates
+        .map((p: any) => ({
+          id: p.id, username: p.username, full_name: p.full_name ?? null,
+          avatar_url: p.avatar_url ?? null,
+          follower_count: realFollowerCounts[p.id] ?? 0,
+          is_following: false, is_verified: !!p.is_verified,
+        }))
+        .sort((a, b) => b.follower_count - a.follower_count)
+        .slice(0, 8);
+
+      setFollowRecs(recs);
+    } catch (err) { console.error("fetchFollowRecs error:", err); }
   }
 
-  function changeTab(tab: SearchTab) {
-    setActiveTab(tab);
-    router.push(`/discover?tab=${tab}${searchQuery ? `&q=${encodeURIComponent(searchQuery)}` : ''}`);
+  // ── Interactions ───────────────────────────────────────────────────────────
+
+  function navigate(path: string) {
+    cache.scrollY = scrollRef.current?.scrollTop ?? 0;
+    cache.mode = mode;
+    cache.category = category;
+    router.push(path);
   }
 
-  function getStandingBadge(profile: SearchProfile) {
-    if (profile.standing) {
-      const standingConfig: Record<string, { label: string; icon: string; bg: string }> = {
-        'legendary': { label: 'LEGENDARY', icon: '👑', bg: 'bg-gradient-to-r from-yellow-500 to-orange-500 text-white' },
-        'elite': { label: 'ELITE', icon: '⭐', bg: 'bg-black text-white' },
-        'creator': { label: 'CREATOR', icon: '✦', bg: 'bg-black/80 text-white' },
-        'rising': { label: 'RISING', icon: '◆', bg: 'bg-black/60 text-white' },
-        'member': { label: 'MEMBER', icon: '○', bg: 'bg-black/20 text-black' }
-      };
-      return standingConfig[profile.standing] || standingConfig['member'];
-    }
+  async function toggleLike(itemId: string, currentlyLiked: boolean) {
+    if (!currentUserId || !isOnboarded) { setShowLoginPrompt(true); return; }
+    try {
+      // Determine table: try catalog_items first; if not found it's a feed item
+      const { data: isCI } = await supabase.from("catalog_items").select("id").eq("id", itemId).maybeSingle();
+      const table = isCI ? "liked_items" : "liked_feed_post_items";
+      if (currentlyLiked) {
+        await supabase.from(table).delete().eq("user_id", currentUserId).eq("item_id", itemId);
+      } else {
+        await supabase.from(table).insert({ user_id: currentUserId, item_id: itemId });
+      }
+      const upd = (i: GridItem) => i.id === itemId
+        ? { ...i, is_liked: !currentlyLiked, like_count: i.like_count + (currentlyLiked ? -1 : 1) }
+        : i;
+      setItems((prev) => prev.map(upd));
+      if (expandedItem?.id === itemId) setExpandedItem((prev) => prev ? upd(prev) : null);
+    } catch (err) { console.error(err); }
+  }
 
-    if (profile.follower_count >= 1000) {
-      return { label: 'ELITE', icon: '⭐', bg: 'bg-black text-white' };
-    } else if (profile.follower_count >= 100) {
-      return { label: 'CREATOR', icon: '✦', bg: 'bg-black/80 text-white' };
-    } else if (profile.follower_count >= 10) {
-      return { label: 'RISING', icon: '◆', bg: 'bg-black/60 text-white' };
+  async function toggleBookmark(catalogId: string, currently: boolean) {
+    if (!currentUserId || !isOnboarded) { setShowLoginPrompt(true); return; }
+    try {
+      if (currently) {
+        await supabase.from("bookmarked_catalogs").delete().eq("user_id", currentUserId).eq("catalog_id", catalogId);
+      } else {
+        await supabase.from("bookmarked_catalogs").insert({ user_id: currentUserId, catalog_id: catalogId });
+      }
+      setSpotlightCatalogs((prev) => prev.map((c) =>
+        c.id === catalogId ? { ...c, is_bookmarked: !currently, bookmark_count: c.bookmark_count + (currently ? -1 : 1) } : c
+      ));
+    } catch (err) { console.error(err); }
+  }
+
+  async function toggleFollow(profileId: string, currently: boolean) {
+    if (!currentUserId || !isOnboarded) { setShowLoginPrompt(true); return; }
+    try {
+      if (currently) {
+        await supabase.from("followers").delete().eq("follower_id", currentUserId).eq("following_id", profileId);
+      } else {
+        await supabase.from("followers").insert({ follower_id: currentUserId, following_id: profileId });
+      }
+      setFollowRecs((prev) => prev.map((p) =>
+        p.id === profileId ? { ...p, is_following: !currently } : p
+      ));
+    } catch (err) { console.error(err); }
+  }
+
+  function handleItemClick(item: GridItem) {
+    if (item.type === "feed_post" && item.feed_post_id) {
+      navigate(`/feed/${item.feed_post_id}`);
     } else {
-      return { label: 'MEMBER', icon: '○', bg: 'bg-black/20 text-black' };
+      setExpandedItem(item);
     }
   }
+
+  function changeMode(m: DiscoverMode) {
+    if (m === mode) return;
+    cache.scrollY = 0;
+    restoredScroll.current = true;
+    if (scrollRef.current) scrollRef.current.scrollTop = 0;
+    setMode(m);
+    cache.mode = m;
+  }
+
+  function changeCategory(c: string) {
+    if (c === category) return;
+    cache.scrollY = 0;
+    restoredScroll.current = true;
+    if (scrollRef.current) scrollRef.current.scrollTop = 0;
+    setCategory(c);
+    cache.category = c;
+  }
+
+  // ── Grid builder ───────────────────────────────────────────────────────────
+  function buildGrid() {
+    const nodes: React.ReactNode[] = [];
+    let si = 0; // spotlight index
+
+    for (let i = 0; i < items.length; i++) {
+      // Inject spotlight every 8 items (offset by 4 so first one lands at position 4)
+      if (i > 0 && (i + 4) % 8 === 0 && si < spotlightCatalogs.length) {
+        nodes.push(
+          <CatalogSpotlight
+            key={`spot-${spotlightCatalogs[si].id}`}
+            catalog={spotlightCatalogs[si]}
+            onBookmark={toggleBookmark}
+            onNavigate={navigate}
+          />
+        );
+        si++;
+      }
+      nodes.push(
+        <ItemCard
+          key={`${items[i].type}-${items[i].id}`}
+          item={items[i]}
+          onLike={toggleLike}
+          onExpand={setExpandedItem}
+          onClick={handleItemClick}
+        />
+      );
+    }
+    return nodes;
+  }
+
+  const modeLabel: Record<DiscoverMode, string> = { trending: "TRENDING", new: "NEW DROPS", following: "FOLLOWING" };
 
   return (
     <>
@@ -979,489 +1153,173 @@ async function toggleLike(itemId: string, currentlyLiked: boolean) {
         input, textarea, select { font-size: 16px !important; }
       `}</style>
 
-      <div className="min-h-screen bg-white text-black pb-24 md:pb-0">
-        {/* Header */}
-        <div className="border-b border-black/20 p-6 md:p-10">
-          <div className="max-w-7xl mx-auto">
-            <h1 className="text-4xl md:text-5xl font-black tracking-tighter mb-6" style={{ fontFamily: 'Archivo Black, sans-serif' }}>
+      {/*
+        KEY SCROLL FIX: the entire page scrolls inside this div, NOT window.
+        This prevents conflicts between window.scrollY and layout repaints that
+        cause glitchy scroll behaviour with sticky headers.
+      */}
+      <div
+        ref={scrollRef}
+        className="h-screen overflow-y-auto overscroll-none bg-white text-black"
+        style={{ WebkitOverflowScrolling: "touch" }}
+      >
+        {/* ── Sticky header ── */}
+        <div className="sticky top-0 z-30 bg-white border-b border-black/10">
+          {/* Title row */}
+          <div className="px-5 md:px-10 pt-5 pb-0 flex items-end justify-between">
+            <h1 className="text-4xl md:text-5xl font-black tracking-tighter leading-none pb-3" style={{ fontFamily: "Archivo Black, sans-serif" }}>
               DISCOVER
             </h1>
+            <button
+              onClick={() => setSearchOpen(true)}
+              className="flex items-center gap-1.5 pb-3 hover:opacity-40 transition-opacity"
+            >
+              <span className="text-xl leading-none">⌕</span>
+              <span className="text-[10px] tracking-[0.3em] font-black hidden md:inline opacity-40" style={{ fontFamily: "Bebas Neue, sans-serif" }}>SEARCH</span>
+            </button>
+          </div>
 
-            {/* Search Bar */}
-            <form onSubmit={handleSearch} className="mb-6">
-              <input
-                type="text"
-                value={searchQuery}
-                onChange={(e) => setSearchQuery(e.target.value)}
-                placeholder={`SEARCH ${activeTab.toUpperCase()}...`}
-                className="w-full px-4 py-3 border-2 border-black bg-white text-black placeholder-black/40 focus:outline-none focus:border-black text-sm tracking-wider"
-                style={{ fontFamily: 'Bebas Neue, sans-serif', fontSize: '16px' }}
-              />
-            </form>
+          {/* Mode tabs */}
+          <div className="flex px-5 md:px-10 gap-0 border-t border-black/8">
+            {(["trending", "new", "following"] as DiscoverMode[]).map((m) => (
+              <button
+                key={m}
+                onClick={() => changeMode(m)}
+                className={`px-4 py-2.5 text-[10px] tracking-[0.25em] font-black border-b-2 transition-all ${
+                  mode === m ? "border-black text-black" : "border-transparent text-black/25 hover:text-black/50"
+                }`}
+                style={{ fontFamily: "Bebas Neue, sans-serif" }}
+              >
+                {modeLabel[m]}
+              </button>
+            ))}
+          </div>
 
-            {/* Tabs */}
-            <div className="flex flex-wrap gap-2 mb-4">
-              <button
-                onClick={() => changeTab("items")}
-                className={`px-6 py-2 text-xs tracking-wider font-black transition-all ${
-                  activeTab === "items"
-                    ? "bg-black text-white"
-                    : "bg-white text-black border border-black/20 hover:bg-black/10"
-                }`}
-                style={{ fontFamily: 'Bebas Neue, sans-serif' }}
-              >
-                ITEMS
-              </button>
-              <button
-                onClick={() => changeTab("catalogs")}
-                className={`px-6 py-2 text-xs tracking-wider font-black transition-all ${
-                  activeTab === "catalogs"
-                    ? "bg-black text-white"
-                    : "bg-white text-black border border-black/20 hover:bg-black/10"
-                }`}
-                style={{ fontFamily: 'Bebas Neue, sans-serif' }}
-              >
-                CATALOGS
-              </button>
-              <button
-                onClick={() => changeTab("profiles")}
-                className={`px-6 py-2 text-xs tracking-wider font-black transition-all ${
-                  activeTab === "profiles"
-                    ? "bg-black text-white"
-                    : "bg-white text-black border border-black/20 hover:bg-black/10"
-                }`}
-                style={{ fontFamily: 'Bebas Neue, sans-serif' }}
-              >
-                PROFILES
+          {/* Category chips */}
+          <div className="border-t border-black/8 overflow-x-auto scrollbar-none">
+            <div className="flex gap-1.5 px-5 md:px-10 py-2 min-w-max">
+              {categories.map((cat) => (
+                <button
+                  key={cat.v}
+                  onClick={() => changeCategory(cat.v)}
+                  className={`px-3 py-1 text-[9px] tracking-wider font-black border transition-all whitespace-nowrap ${
+                    category === cat.v
+                      ? "bg-black text-white border-black"
+                      : "border-black/12 text-black/40 hover:border-black/40 hover:text-black/70"
+                  }`}
+                  style={{ fontFamily: "Bebas Neue, sans-serif" }}
+                >
+                  {cat.l}
+                </button>
+              ))}
+            </div>
+          </div>
+        </div>
+
+        {/* ── Content ── */}
+        <div className="px-5 md:px-10 py-5 max-w-7xl mx-auto">
+
+          {loading ? (
+            <div className="flex items-center justify-center py-32">
+              <p className="text-[10px] tracking-[0.5em] opacity-20 animate-pulse" style={{ fontFamily: "Bebas Neue, sans-serif" }}>LOADING</p>
+            </div>
+
+          ) : mode === "following" && !currentUserId ? (
+            <div className="flex flex-col items-center justify-center py-32 gap-4">
+              <p className="text-2xl tracking-wider opacity-20" style={{ fontFamily: "Bebas Neue, sans-serif" }}>LOG IN TO SEE YOUR FEED</p>
+              <button onClick={() => router.push("/login")} className="px-6 py-2.5 bg-black text-white text-[10px] tracking-[0.3em] font-black border-2 border-black hover:bg-white hover:text-black transition-all" style={{ fontFamily: "Bebas Neue, sans-serif" }}>
+                LOG IN
               </button>
             </div>
 
-            {/* Filters - Only show for Items tab */}
-            {activeTab === "items" && (
-              <div className="border-t border-black/20 pt-4">
-                <div className="flex items-center justify-between mb-3">
-                  <div className="flex items-center gap-4">
-                    <button
-                      onClick={() => setShowFilters(!showFilters)}
-                      className="text-xs tracking-wider font-black hover:opacity-70 transition-opacity flex items-center gap-2"
-                      style={{ fontFamily: 'Bebas Neue, sans-serif' }}
-                    >
-                      {showFilters ? '▼' : '▶'} FILTERS
-                    </button>
-                    {(selectedCategory !== "all" || selectedColor !== "all" || selectedGender !== "all" || selectedSeason !== "all" || priceRange !== "all") && (
-                      <button
-                        onClick={() => {
-                          setSelectedCategory("all");
-                          setSelectedColor("all");
-                          setSelectedGender("all");
-                          setSelectedSeason("all");
-                          setPriceRange("all");
-                        }}
-                        className="text-[10px] tracking-wider opacity-60 hover:opacity-100 transition-opacity underline"
-                        style={{ fontFamily: 'Bebas Neue, sans-serif' }}
-                      >
-                        CLEAR FILTERS
-                      </button>
-                    )}
-                  </div>
-                  <div className="flex items-center gap-3">
-                    <span className="text-[10px] tracking-wider opacity-60" style={{ fontFamily: 'Bebas Neue, sans-serif' }}>
-                      {items.length} RESULTS
-                    </span>
-                    <select
-                      value={sortBy}
-                      onChange={(e) => setSortBy(e.target.value)}
-                      className="px-3 py-1.5 border border-black/20 bg-white text-xs tracking-wider font-black focus:outline-none focus:border-black"
-                      style={{ fontFamily: 'Bebas Neue, sans-serif', fontSize: '16px' }}
-                    >
-                      {sortOptions.map(option => (
-                        <option key={option.value} value={option.value}>{option.label}</option>
-                      ))}
-                    </select>
+          ) : mode === "following" && items.length === 0 ? (
+            // Following tab with no content — show follow recs prominently
+            <div className="py-10 space-y-8">
+              <div className="text-center space-y-2">
+                <p className="text-2xl tracking-wider opacity-20" style={{ fontFamily: "Bebas Neue, sans-serif" }}>FOLLOW CREATORS TO SEE THEIR PIECES</p>
+                <p className="text-[10px] opacity-30 tracking-wider" style={{ fontFamily: "Bebas Neue, sans-serif" }}>SUGGESTED FOR YOU</p>
+              </div>
+              {followRecs.length > 0 && (
+                <div className="grid grid-cols-1 md:grid-cols-2 gap-2 max-w-xl mx-auto">
+                  {followRecs.map((p) => (
+                    <ProfileChip
+                      key={p.id}
+                      profile={p}
+                      currentUserId={currentUserId}
+                      isOnboarded={isOnboarded}
+                      onFollow={toggleFollow}
+                      onNavigate={(username) => navigate(`/${username}`)}
+                    />
+                  ))}
+                </div>
+              )}
+              <div className="text-center">
+                <button onClick={() => changeMode("trending")} className="px-6 py-2.5 bg-black text-white text-[10px] tracking-[0.3em] font-black border-2 border-black hover:bg-white hover:text-black transition-all" style={{ fontFamily: "Bebas Neue, sans-serif" }}>
+                  BROWSE TRENDING INSTEAD
+                </button>
+              </div>
+            </div>
+
+          ) : (
+            <>
+              {/* Following: follow recs strip above the grid */}
+              {mode === "following" && followRecs.length > 0 && (
+                <div className="mb-5">
+                  <p className="text-[9px] tracking-[0.3em] opacity-30 mb-2 font-black" style={{ fontFamily: "Bebas Neue, sans-serif" }}>SUGGESTED CREATORS</p>
+                  <div className="flex gap-2 overflow-x-auto scrollbar-none pb-1">
+                    {followRecs.map((p) => (
+                      <ProfileChip
+                        key={p.id}
+                        profile={p}
+                        currentUserId={currentUserId}
+                        isOnboarded={isOnboarded}
+                        onFollow={toggleFollow}
+                        onNavigate={(username) => navigate(`/${username}`)}
+                      />
+                    ))}
                   </div>
                 </div>
+              )}
 
-                {showFilters && (
-                  <div className="grid grid-cols-2 md:grid-cols-3 lg:grid-cols-5 gap-3 pb-4">
-                    <select
-                      value={selectedCategory}
-                      onChange={(e) => setSelectedCategory(e.target.value)}
-                      className="px-3 py-2 border border-black/20 bg-white text-xs tracking-wider focus:outline-none focus:border-black"
-                      style={{ fontFamily: 'Bebas Neue, sans-serif', fontSize: '16px' }}
-                    >
-                      {categories.map(cat => (
-                        <option key={cat.value} value={cat.value}>{cat.label}</option>
-                      ))}
-                    </select>
+              {/* Result count */}
+              <p className="text-[9px] tracking-[0.4em] opacity-25 font-black mb-4" style={{ fontFamily: "Bebas Neue, sans-serif" }}>
+                {modeLabel[mode]} — {items.filter(i => i.type === "catalog_item").length} ITEMS
+              </p>
 
-                    <select
-                      value={selectedColor}
-                      onChange={(e) => setSelectedColor(e.target.value)}
-                      className="px-3 py-2 border border-black/20 bg-white text-xs tracking-wider focus:outline-none focus:border-black"
-                      style={{ fontFamily: 'Bebas Neue, sans-serif', fontSize: '16px' }}
-                    >
-                      {colors.map(color => (
-                        <option key={color.value} value={color.value}>{color.label}</option>
-                      ))}
-                    </select>
-
-                    <select
-                      value={selectedGender}
-                      onChange={(e) => setSelectedGender(e.target.value)}
-                      className="px-3 py-2 border border-black/20 bg-white text-xs tracking-wider focus:outline-none focus:border-black"
-                      style={{ fontFamily: 'Bebas Neue, sans-serif', fontSize: '16px' }}
-                    >
-                      {genders.map(gender => (
-                        <option key={gender.value} value={gender.value}>{gender.label}</option>
-                      ))}
-                    </select>
-
-                    <select
-                      value={selectedSeason}
-                      onChange={(e) => setSelectedSeason(e.target.value)}
-                      className="px-3 py-2 border border-black/20 bg-white text-xs tracking-wider focus:outline-none focus:border-black"
-                      style={{ fontFamily: 'Bebas Neue, sans-serif', fontSize: '16px' }}
-                    >
-                      {seasons.map(season => (
-                        <option key={season.value} value={season.value}>{season.label}</option>
-                      ))}
-                    </select>
-
-                    <select
-                      value={priceRange}
-                      onChange={(e) => setPriceRange(e.target.value)}
-                      className="px-3 py-2 border border-black/20 bg-white text-xs tracking-wider focus:outline-none focus:border-black"
-                      style={{ fontFamily: 'Bebas Neue, sans-serif', fontSize: '16px' }}
-                    >
-                      {priceRanges.map(range => (
-                        <option key={range.value} value={range.value}>{range.label}</option>
-                      ))}
-                    </select>
-                  </div>
-                )}
+              {/* Grid */}
+              <div className="grid grid-cols-2 md:grid-cols-3 lg:grid-cols-4 xl:grid-cols-5 gap-3 md:gap-4">
+                {buildGrid()}
               </div>
-            )}
-          </div>
+            </>
+          )}
         </div>
 
-        {/* Results */}
-        <div className="p-6 md:p-10">
-          <div className="max-w-7xl mx-auto">
-            {loading ? (
-              <div className="text-center py-20">
-                <p className="text-xs tracking-[0.4em]" style={{ fontFamily: 'Bebas Neue, sans-serif' }}>LOADING...</p>
-              </div>
-            ) : (
-              <>
-                {/* Items Tab */}
-                {activeTab === "items" && (
-                  <>
-                    {items.length === 0 ? (
-                      <div className="text-center py-20">
-                        <p className="text-lg tracking-wider opacity-40" style={{ fontFamily: 'Bebas Neue, sans-serif' }}>NO ITEMS FOUND</p>
-                      </div>
-                    ) : (
-                      <div className="grid grid-cols-2 md:grid-cols-3 lg:grid-cols-4 xl:grid-cols-5 gap-4 md:gap-6">
-                        {items.map((item) => (
-                          <div key={item.id} className="border border-black/20 hover:border-black transition-all">
-                            {/* Added relative + badge, kept original onClick intact */}
-                            <div className="aspect-square bg-white overflow-hidden cursor-pointer relative" onClick={(e) => handleItemClick(item, e)}>
-                              <img src={item.image_url} alt={item.title} className="w-full h-full object-cover" />
-                              {/* ── FTC DISCLOSURE BADGE ── */}
-                              {item.is_monetized && (
-                                <div
-                                  className="absolute top-2 right-2 z-10 w-5 h-5 bg-black/20 backdrop-blur-sm flex items-center justify-center"
-                                  title="Affiliate link — we may earn a commission at no cost to you"
-                                >
-                                  <span className="text-[10px] font-black text-white" style={{ fontFamily: 'Bebas Neue, sans-serif' }}>$</span>
-                                </div>
-                              )}
-                            </div>
-
-                            <div className="p-3 bg-white border-t border-black/20">
-                              <h3 className="text-xs font-black tracking-wide uppercase leading-tight truncate mb-2" style={{ fontFamily: 'Bebas Neue, sans-serif' }}>{item.title}</h3>
-
-                              <div className="flex items-center justify-between text-[10px] tracking-wider opacity-60 mb-2">
-                                {item.seller && <span className="truncate">{item.seller}</span>}
-                                {item.price && <span className="ml-auto">${item.price}</span>}
-                              </div>
-
-                              {item.brand && (
-                                <div className="text-[9px] tracking-wider opacity-40 mb-2">
-                                  {item.brand}
-                                </div>
-                              )}
-
-                              <div className="flex items-center gap-1 text-[10px] tracking-wider opacity-60 mb-2">
-                                <span>♥ {item.like_count} {item.like_count === 1 ? 'like' : 'likes'}</span>
-                              </div>
-
-                              <div className="flex gap-2">
-                                <button
-                                  onClick={(e) => { e.stopPropagation(); toggleLike(item.id, item.is_liked); }}
-                                  className={`flex-1 py-1 border transition-all text-xs flex items-center justify-center gap-1 font-black ${
-                                    item.is_liked
-                                      ? 'border-black bg-black text-white hover:bg-white hover:text-black'
-                                      : 'border-black/20 hover:border-black hover:bg-black/10'
-                                  }`}
-                                  style={{ fontFamily: 'Bebas Neue, sans-serif' }}
-                                >
-                                  {item.is_liked ? '♥ LIKED' : '♡ LIKE'}
-                                </button>
-                                <button
-                                  onClick={(e) => { e.stopPropagation(); setExpandedItem(item); }}
-                                  className="px-3 py-1 border border-black/20 hover:border-black hover:bg-black/10 transition-all text-xs font-black"
-                                  style={{ fontFamily: 'Bebas Neue, sans-serif' }}
-                                >
-                                  VIEW
-                                </button>
-                              </div>
-                            </div>
-                          </div>
-                        ))}
-                      </div>
-                    )}
-                  </>
-                )}
-
-                {/* Catalogs Tab */}
-                {activeTab === "catalogs" && (
-                  <>
-                    {catalogs.length === 0 ? (
-                      <div className="text-center py-20">
-                        <p className="text-lg tracking-wider opacity-40" style={{ fontFamily: 'Bebas Neue, sans-serif' }}>NO CATALOGS FOUND</p>
-                      </div>
-                    ) : (
-                      <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-6">
-                        {catalogs.map((catalog) => (
-                          <div key={catalog.id} className="border-2 border-black/20 hover:border-black transition-all cursor-pointer" onClick={() => router.push(`/${catalog.owner?.username}/${catalog.slug}`)}>
-                            <div className="aspect-square bg-black/5 overflow-hidden">
-                              {catalog.image_url ? (
-                                <img src={catalog.image_url} alt={catalog.name} className="w-full h-full object-cover" />
-                              ) : (
-                                <div className="w-full h-full flex items-center justify-center">
-                                  <span className="text-6xl opacity-20">✦</span>
-                                </div>
-                              )}
-                            </div>
-
-                            <div className="p-4">
-                              <h3 className="text-xl font-black tracking-tighter mb-2" style={{ fontFamily: 'Archivo Black, sans-serif' }}>{catalog.name}</h3>
-
-                              {catalog.description && (
-                                <p className="text-sm opacity-60 mb-3 line-clamp-2">{catalog.description}</p>
-                              )}
-
-                              <div
-                                className="flex items-center gap-2 mb-3 cursor-pointer hover:opacity-70 transition-opacity"
-                                onClick={(e) => {
-                                  e.stopPropagation();
-                                  router.push(`/${catalog.owner?.username}`);
-                                }}
-                              >
-                                <div className="w-6 h-6 rounded-full border border-black overflow-hidden">
-                                  {catalog.owner?.avatar_url ? (
-                                    <img src={catalog.owner.avatar_url} alt={catalog.owner.username} className="w-full h-full object-cover" />
-                                  ) : (
-                                    <div className="w-full h-full bg-black/5" />
-                                  )}
-                                </div>
-                                <span className="text-xs tracking-wider" style={{ fontFamily: 'Bebas Neue, sans-serif' }}>@{catalog.owner?.username}</span>
-                              </div>
-
-                              <div className="flex items-center justify-between mb-3">
-                                <div className="flex items-center gap-1 text-xs tracking-wider font-black" style={{ fontFamily: 'Bebas Neue, sans-serif' }}>
-                                  <span>{catalog.item_count}</span>
-                                  <span className="opacity-60">ITEMS</span>
-                                </div>
-                                <div className="flex items-center gap-1 text-xs tracking-wider font-black" style={{ fontFamily: 'Bebas Neue, sans-serif' }}>
-                                  <span className="text-base">🔖</span>
-                                  <span>{catalog.bookmark_count}</span>
-                                  <span className="opacity-60">BOOKMARKS</span>
-                                </div>
-                              </div>
-
-                              <button
-                                onClick={(e) => { e.stopPropagation(); toggleBookmark(catalog.id, catalog.is_bookmarked); }}
-                                className={`w-full py-2 border-2 transition-all text-xs tracking-wider font-black ${
-                                  catalog.is_bookmarked
-                                    ? 'bg-black text-white border-black hover:bg-white hover:text-black'
-                                    : 'border-black text-black hover:bg-black hover:text-white'
-                                }`}
-                                style={{ fontFamily: 'Bebas Neue, sans-serif' }}
-                              >
-                                {catalog.is_bookmarked ? '🔖 BOOKMARKED' : 'BOOKMARK'}
-                              </button>
-                            </div>
-                          </div>
-                        ))}
-                      </div>
-                    )}
-                  </>
-                )}
-
-                {/* Profiles Tab */}
-                {activeTab === "profiles" && (
-                  <>
-                    {profiles.length === 0 ? (
-                      <div className="text-center py-20">
-                        <p className="text-lg tracking-wider opacity-40" style={{ fontFamily: 'Bebas Neue, sans-serif' }}>NO PROFILES FOUND</p>
-                      </div>
-                    ) : (
-                      <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
-                        {profiles.map((profile) => {
-                          const standingBadge = getStandingBadge(profile);
-                          return (
-                            <div
-                              key={profile.id}
-                              className="border border-black/20 hover:border-black transition-all cursor-pointer"
-                              style={{ borderRadius: '50px' }}
-                              onClick={() => router.push(`/${profile.username}`)}
-                            >
-                              <div className="flex items-center gap-3 p-3">
-                                <div className="w-14 h-14 md:w-16 md:h-16 rounded-full border border-black overflow-hidden flex-shrink-0">
-                                  {profile.avatar_url ? (
-                                    <img src={profile.avatar_url} alt={profile.username} className="w-full h-full object-cover" />
-                                  ) : (
-                                    <div className="w-full h-full bg-black/5 flex items-center justify-center">
-                                      <span className="text-xl opacity-20">👤</span>
-                                    </div>
-                                  )}
-                                </div>
-
-                                <div className="flex-1 min-w-0">
-                                  <div className="flex items-center gap-1.5 mb-0.5">
-                                    <h3 className="text-base md:text-lg font-black tracking-tighter truncate" style={{ fontFamily: 'Archivo Black, sans-serif' }}>
-                                      @{profile.username}
-                                    </h3>
-                                    {profile.is_verified && (
-                                      <span className="text-blue-500 text-sm flex-shrink-0">✓</span>
-                                    )}
-                                  </div>
-                                  {profile.full_name && (
-                                    <p className="text-xs opacity-60 mb-1.5 truncate">{profile.full_name}</p>
-                                  )}
-                                  <div className="flex items-center gap-1.5 flex-wrap">
-                                    <span className="text-[9px] tracking-wider opacity-60 flex-shrink-0">{profile.follower_count} FOLLOWERS</span>
-                                    <div className={`px-1.5 py-0.5 ${standingBadge.bg} text-[8px] tracking-wider font-black flex-shrink-0`} style={{ fontFamily: 'Bebas Neue, sans-serif' }}>
-                                      {standingBadge.icon} {standingBadge.label}
-                                    </div>
-                                    {(profile.badges && profile.badges.length > 0) && profile.badges.slice(0, 2).map((badge, idx) => {
-                                      const badgeDisplay: Record<string, { label: string; bg: string }> = {
-                                        'early-adopter': { label: '🌟', bg: 'bg-purple-500 text-white' },
-                                        'top-contributor': { label: '🏆', bg: 'bg-yellow-600 text-white' },
-                                        'influencer': { label: '📢', bg: 'bg-pink-500 text-white' },
-                                        'curator': { label: '🎨', bg: 'bg-indigo-500 text-white' },
-                                        'trendsetter': { label: '⚡', bg: 'bg-orange-500 text-white' },
-                                        'collector': { label: '💎', bg: 'bg-cyan-500 text-white' }
-                                      };
-                                      const badgeInfo = badgeDisplay[badge] || { label: badge[0].toUpperCase(), bg: 'bg-gray-500 text-white' };
-                                      return (
-                                        <div key={idx} className={`px-1 py-0.5 ${badgeInfo.bg} text-[8px] flex-shrink-0`}>
-                                          {badgeInfo.label}
-                                        </div>
-                                      );
-                                    })}
-                                  </div>
-                                </div>
-                              </div>
-                            </div>
-                          );
-                        })}
-                      </div>
-                    )}
-                  </>
-                )}
-              </>
-            )}
-          </div>
-        </div>
-
-        {/* Expanded Item Modal */}
+        {/* ── Modals ── */}
         {expandedItem && (
-          <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-black/90 backdrop-blur-md" onClick={() => setExpandedItem(null)}>
-            <div className="relative w-full max-w-sm md:max-w-3xl max-h-[85vh] md:max-h-[90vh]" onClick={(e) => e.stopPropagation()}>
-              <button onClick={() => setExpandedItem(null)} className="absolute -top-8 md:-top-12 right-0 text-white text-xs tracking-[0.4em] hover:opacity-50" style={{ fontFamily: 'Bebas Neue, sans-serif' }}>[ESC]</button>
-
-              <div className="bg-white border-2 border-white overflow-hidden">
-                <div className="grid md:grid-cols-2 gap-0">
-                    <div className="aspect-square bg-black/5 overflow-hidden cursor-pointer" onClick={(e) => handleItemClick(expandedItem, e)}>                    <img src={expandedItem.image_url} alt={expandedItem.title} className="w-full h-full object-contain" />
-                  </div>
-
-                  <div className="p-4 md:p-8 space-y-3 md:space-y-6">
-                    {/* Title + FTC disclosure */}
-                    <div>
-                      <h2 className="text-xl md:text-3xl font-black tracking-tighter" style={{ fontFamily: 'Archivo Black, sans-serif' }}>{expandedItem.title}</h2>
-                      {/* ── FTC DISCLOSURE (expanded modal) ── */}
-                      {expandedItem.is_monetized && (
-                        <p className="text-[9px] tracking-[0.3em] opacity-40 mt-1.5" style={{ fontFamily: 'Bebas Neue, sans-serif' }}>
-                          $ THIS IS AN AFFILIATED ITEM
-                        </p>
-                      )}
-                    </div>
-
-                    {expandedItem.brand && (
-                      <p className="text-xs md:text-sm tracking-wider opacity-60">BRAND: {expandedItem.brand}</p>
-                    )}
-
-                    {expandedItem.seller && (
-                      <p className="text-xs md:text-sm tracking-wider opacity-60">SELLER: {expandedItem.seller}</p>
-                    )}
-
-                    {expandedItem.price && (
-                      <p className="text-lg md:text-2xl font-black tracking-wide" style={{ fontFamily: 'Bebas Neue, sans-serif' }}>${expandedItem.price}</p>
-                    )}
-
-                    {expandedItem.style_tags && expandedItem.style_tags.length > 0 && (
-                      <div className="flex flex-wrap gap-2">
-                        {expandedItem.style_tags.map((tag, idx) => (
-                          <span key={idx} className="px-2 py-1 bg-black/10 text-[10px] tracking-wider font-black" style={{ fontFamily: 'Bebas Neue, sans-serif' }}>
-                            {tag}
-                          </span>
-                        ))}
-                      </div>
-                    )}
-
-                    <div className="space-y-2 md:space-y-3">
-                      <button
-                        onClick={() => toggleLike(expandedItem.id, expandedItem.is_liked)}
-                        className="w-full py-2 md:py-3 border-2 border-black hover:bg-black hover:text-white transition-all text-[10px] md:text-xs tracking-[0.4em] font-black"
-                        style={{ fontFamily: 'Bebas Neue, sans-serif' }}
-                      >
-                        {expandedItem.is_liked ? '♥ LIKED' : '♡ LIKE'} ({expandedItem.like_count})
-                      </button>
-
-                      {expandedItem.product_url && (
-                        <button
-                          onClick={(e) => handleItemClick(expandedItem, e)}
-                          className="w-full py-2 md:py-3 bg-black text-white hover:bg-white hover:text-black hover:border-2 hover:border-black transition-all text-[10px] md:text-xs tracking-[0.4em] font-black"
-                          style={{ fontFamily: 'Bebas Neue, sans-serif' }}
-                        >
-                          VIEW PRODUCT ↗
-                        </button>
-                      )}
-
-                      <button
-                        onClick={() => router.push(`/${expandedItem.catalog.owner.username}/${expandedItem.catalog.slug}`)}
-                        className="w-full py-2 md:py-3 border border-black/20 hover:border-black hover:bg-black/10 transition-all text-[10px] md:text-xs tracking-[0.4em] font-black"
-                        style={{ fontFamily: 'Bebas Neue, sans-serif' }}
-                      >
-                        VIEW CATALOG: {expandedItem.catalog.name}
-                      </button>
-                    </div>
-                  </div>
-                </div>
-              </div>
-            </div>
-          </div>
+          <ItemModal
+            item={expandedItem}
+            onClose={() => setExpandedItem(null)}
+            onLike={toggleLike}
+            onNavigate={navigate}
+            currentUserId={currentUserId}
+            isOnboarded={isOnboarded}
+            onRequireLogin={() => setShowLoginPrompt(true)}
+          />
         )}
 
-        {/* Login Message */}
-        {showLoginMessage && (
-          <div className="fixed top-24 left-1/2 -translate-x-1/2 md:top-auto md:bottom-6 md:right-6 md:left-auto md:translate-x-0 z-[9999] w-[calc(100%-2rem)] max-w-sm">
-            <div className="bg-black border-2 border-white p-4 shadow-lg relative">
-              <button onClick={() => setShowLoginMessage(false)} className="absolute top-2 right-2 text-white hover:opacity-50 transition-opacity text-lg leading-none">✕</button>
-              <p className="text-white text-sm tracking-wide pr-6" style={{ fontFamily: 'Bebas Neue, sans-serif' }}>YOU MUST BE LOGGED IN</p>
+        {searchOpen && (
+          <SearchOverlay
+            onClose={() => setSearchOpen(false)}
+            currentUserId={currentUserId}
+            onNavigate={navigate}
+          />
+        )}
+
+        {showLoginPrompt && (
+          <div className="fixed bottom-6 left-1/2 -translate-x-1/2 z-[9999] w-[calc(100%-2rem)] max-w-xs">
+            <div className="bg-black p-4 relative flex items-center justify-between gap-4">
+              <p className="text-white text-[11px] tracking-wider font-black" style={{ fontFamily: "Bebas Neue, sans-serif" }}>YOU MUST BE LOGGED IN</p>
+              <button onClick={() => setShowLoginPrompt(false)} className="text-white/50 hover:text-white transition-colors text-sm leading-none flex-shrink-0">✕</button>
             </div>
           </div>
         )}
@@ -1473,8 +1331,8 @@ async function toggleLike(itemId: string, currentlyLiked: boolean) {
 export default function DiscoverPage() {
   return (
     <Suspense fallback={
-      <div className="min-h-screen bg-white flex items-center justify-center">
-        <p className="text-xs tracking-[0.4em]" style={{ fontFamily: 'Bebas Neue, sans-serif' }}>LOADING...</p>
+      <div className="h-screen bg-white flex items-center justify-center">
+        <p className="text-[10px] tracking-[0.4em] opacity-20" style={{ fontFamily: "Bebas Neue, sans-serif" }}>LOADING</p>
       </div>
     }>
       <DiscoverContent />
