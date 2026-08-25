@@ -8,6 +8,16 @@ Built and shipped solo, end to end: product design, frontend, backend, database 
 
 🔗 **Live:** [thesourcedapp.com](https://thesourcedapp.com)
 
+## Product
+
+![Sourced Discover](./docs/screenshots/discover.jpg)
+
+![Sourced Creator Profile](./docs/screenshots/creator-profile.jpg)
+
+![Sourced Monetization](./docs/screenshots/monetization.jpg)
+
+![Sourced Analytics](./docs/screenshots/analytics.jpg)
+
 ---
 
 ## What it does
