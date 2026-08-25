@@ -10,13 +10,13 @@ Built and shipped solo, end to end: product design, frontend, backend, database 
 
 ## Product
 
-![Sourced Discover](./screenshots/discover.jpg)
+![Sourced Featured](./screenshots/FeaturedPage.jpg)
 
-![Sourced Creator Profile](./screenshots/creator-profile.jpg)
+![Sourced Creator Profile](./screenshots/ProfilePage.jpg)
 
-![Sourced Monetization](./screenshots/monetization.jpg)
+![Sourced Monetization](./screenshots/MonetizationPage.jpg)
 
-![Sourced Analytics](./screenshots/analytics.jpg)
+![Sourced Analytics](./screenshots/CreatorInsightsPage.jpg)
 
 ---
 
